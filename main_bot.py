@@ -1,4 +1,4 @@
-# main_bot.py (Webhook Version with Synchronous Init - Fixed Handler Placement)
+# main_bot.py (Webhook Version with Synchronous Init - Removed .initialized check)
 import os
 import logging
 import asyncio
@@ -191,7 +191,7 @@ def initialize_bot():
         application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("convert", convert_command))
         application.add_handler(MessageHandler(filters.COMMAND | filters.TEXT & ~filters.UpdateType.EDITED, unknown))
-        logger.info("Обробники додані до Application.") # Виправлено лог
+        logger.info("Обробники додані до Application.")
 
         # Запускаємо асинхронну ініціалізацію та встановлення вебхука в тимчасовому циклі
         logger.info("Запуск синхронної ініціалізації та встановлення вебхука...")
@@ -217,12 +217,6 @@ def initialize_bot():
                 logger.warning("Не вдалося встановити вебхук під час ініціалізації.")
         else:
             logger.warning("Пропуск встановлення вебхука через відсутність WEBHOOK_URL.")
-
-        # Закриваємо цикл, лише якщо ми його створили
-        # if asyncio.get_event_loop() is loop:
-        #     loop.close()
-        #     logger.info("Синхронна ініціалізація завершена. Тимчасовий цикл закрито.")
-        # Краще не закривати цикл тут, щоб уникнути проблем з Gunicorn/Flask
 
         logger.info("Синхронна ініціалізація завершена.")
 
@@ -260,15 +254,7 @@ async def webhook() -> Response:
         logger.error("Помилка: Глобальний екземпляр Telegram Application не ініціалізовано!")
         return Response(status=500)
 
-    # Перевіряємо, чи application ініціалізовано (на випадок, якщо initialize_bot не спрацював повністю)
-    if not application.initialized:
-        logger.warning("Application не було ініціалізовано раніше. Спроба ініціалізації зараз...")
-        try:
-            await application.initialize() # Спробуємо ініціалізувати асинхронно
-            logger.info("Application успішно ініціалізовано в /webhook.")
-        except Exception as e:
-            logger.error(f"Помилка ініціалізації Application всередині /webhook: {e}", exc_info=True)
-            return Response(status=500)
+    # !!! ВИДАЛЕНО БЛОК ПЕРЕВІРКИ application.initialized !!!
 
     logger.debug("Обробка запиту на /webhook...")
     try:
