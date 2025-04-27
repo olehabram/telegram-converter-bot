@@ -177,69 +177,114 @@ def health_check():
     return "OK", 200
 
 # --- Функція для встановлення вебхука (асинхронна) ---
-async def setup_webhook():
+async def setup_webhook(application: Application, webhook_url: str): # Додали application і url як аргументи
     """Встановлює URL вебхука для Telegram бота."""
-    if not WEBHOOK_URL:
-        logger.error("ПОМИЛКА: Не встановлено змінну середовища WEBHOOK_URL! Неможливо встановити вебхук.")
+    logger.info(f"Спроба встановити вебхук на URL: {webhook_url}") # Логуємо URL
+    if not webhook_url:
+        logger.error("ПОМИЛКА: WEBHOOK_URL порожній! Неможливо встановити вебхук.")
         return False
 
-    logger.info(f"Встановлення вебхука на URL: {WEBHOOK_URL}")
     try:
+        # Встановлюємо вебхук
         await application.bot.set_webhook(
-            url=WEBHOOK_URL,
-            allowed_updates=Update.ALL_TYPES # Отримувати всі типи оновлень
+            url=webhook_url,
+            allowed_updates=Update.ALL_TYPES
         )
-        # Перевірка встановленого вебхука (опціонально, але корисно для діагностики)
+        # Перевіряємо, чи встановився
         webhook_info = await application.bot.get_webhook_info()
-        logger.info(f"Інформація про вебхук: {webhook_info}")
-        if webhook_info.url == WEBHOOK_URL:
-             logger.info("Вебхук успішно встановлено.")
-             return True
+        if webhook_info.url == webhook_url:
+            logger.info(f"Вебхук успішно встановлено на {webhook_info.url}") # Логуємо успіх
+            return True
         else:
-             logger.error(f"Не вдалося встановити вебхук. Поточний URL: {webhook_info.url}")
-             return False
+            logger.error(f"Не вдалося встановити вебхук. Поточний URL: {webhook_info.url}, очікуваний: {webhook_url}") # Логуємо помилку
+            return False
     except Exception as e:
-        logger.error(f"Помилка під час встановлення вебхука: {e}", exc_info=True)
+        logger.error(f"ПОМИЛКА під час виклику set_webhook або get_webhook_info: {e}", exc_info=True) # Логуємо будь-яку виняткову ситуацію
         return False
 
-# --- Основна функція запуску ---
-def main() -> None:
-    """Запускає встановлення вебхука та веб-сервер Flask."""
+# --- Основна функція запуску (трохи змінена) ---
+async def main() -> None: # Робимо main асинхронною
+    """Ініціалізує бота та встановлює вебхук."""
 
-    # Запускаємо асинхронну функцію встановлення вебхука
-    # Важливо: Це потрібно робити в event loop.
-    # Якщо запускати через Gunicorn/Uvicorn, вони керують циклом подій.
-    # Запуск setup_webhook() тут може бути проблематичним поза простим `python main_bot.py`.
-    # Краще встановити вебхук один раз окремо або перевіряти його наявність.
-    # Для спрощення, ми спробуємо запустити його тут.
-    logger.info("Спроба встановити вебхук...")
-    webhook_set_successfully = asyncio.run(setup_webhook())
+    # Перевіряємо змінні середовища
+    bot_token = os.environ.get('BOT_TOKEN')
+    webhook_url = os.environ.get('WEBHOOK_URL') # Отримуємо URL тут
 
-    if not webhook_set_successfully:
-         logger.warning("Не вдалося встановити вебхук при запуску. Перевірте URL та токен.")
-         # Можна вирішити не запускати Flask, якщо вебхук не встановлено,
-         # але часто краще запустити, щоб платформа не вважала сервіс несправним.
-         # exit() # Розкоментуйте, якщо хочете зупинитись при помилці вебхука
+    if not bot_token:
+        logger.critical("ПОМИЛКА: Не знайдено змінну середовища BOT_TOKEN!")
+        return # Зупиняємо, якщо немає токена
+    if not webhook_url:
+         logger.critical("ПОМИЛКА: Не знайдено змінну середовища WEBHOOK_URL!")
+         # Не зупиняємо, але вебхук не встановиться
 
-    # Запускаємо веб-сервер Flask
-    # УВАГА: Для продакшену використовуйте WSGI сервер типу Gunicorn або Uvicorn
-    # Команда запуску буде вказана у Procfile або налаштуваннях платформи.
-    # flask_app.run() підходить лише для локальної розробки.
-    logger.info(f"Веб-сервер Flask готовий (для запуску використовуйте Gunicorn/Uvicorn)")
-    # Наступний рядок потрібен лише якщо ви запускаєте скрипт напряму `python main_bot.py`
-    # У продакшені його виконуватиме Gunicorn/Uvicorn
-    # flask_app.run(host='0.0.0.0', port=PORT, debug=False)
+    # Створюємо екземпляр Application
+    application = Application.builder().token(bot_token).build()
+
+    # --- Реєстрація обробників команд (залишається без змін) ---
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("convert", convert_command))
+    application.add_handler(MessageHandler(filters.COMMAND | filters.TEXT & ~filters.UpdateType.EDITED, unknown))
+
+    # Встановлюємо вебхук (викликаємо асинхронну функцію)
+    # Цей підхід краще працює з фреймворками типу Flask/Gunicorn
+    if webhook_url: # Тільки якщо URL існує
+        await setup_webhook(application, webhook_url)
+    else:
+        logger.warning("Пропуск встановлення вебхука через відсутність WEBHOOK_URL.")
+
+    # Зберігаємо application в контексті Flask для доступу в /webhook
+    # Це один зі способів передати application, можна використовувати й інші
+    flask_app.config['TELEGRAM_APP'] = application
+
+# --- Зміни у Flask App ---
+flask_app = Flask(__name__)
+
+@flask_app.route("/webhook", methods=["POST"])
+async def webhook() -> Response:
+    """Обробляє вхідні оновлення Telegram через вебхук."""
+    logger.debug("Отримано запит на вебхук...")
+    # Отримуємо application з конфігурації Flask
+    application = flask_app.config.get('TELEGRAM_APP')
+    if not application:
+        logger.error("Помилка: Не знайдено екземпляр Telegram Application у конфігурації Flask!")
+        return Response(status=500) # Повертаємо помилку сервера
+
+    try:
+        update_data = request.get_json()
+        if not update_data:
+             logger.warning("Отримано порожні JSON дані.")
+             return Response(status=200)
+
+        logger.info(f"Отримано оновлення: {update_data}")
+        update = Update.de_json(update_data, application.bot)
+
+        # Запускаємо обробку в окремому завданні asyncio
+        asyncio.create_task(application.process_update(update))
+
+        logger.debug("Надіслано відповідь 200 OK до Telegram.")
+        return Response(status=200)
+    except Exception as e:
+        logger.error(f"Помилка обробки оновлення вебхука: {e}", exc_info=True)
+        return Response(status=200) # Все одно повертаємо 200
+
+@flask_app.route("/")
+@flask_app.route("/healthz")
+def health_check():
+    logger.info("Запит на перевірку стану (/ або /healthz)")
+    return "OK", 200
 
 
-# Цей блок виконається, тільки якщо скрипт запускається напряму.
-# Gunicorn/Uvicorn імпортують `flask_app` і не виконають цей блок.
-if __name__ == '__main__':
-     logger.info("Запуск main()...")
-     main()
-     # У реальному розгортанні цей код не дійде до кінця,
-     # бо Gunicorn/Uvicorn запустять `flask_app` напряму.
-     # Якщо ви запускаєте локально `python main_bot.py`,
-     # вам потрібно додати `flask_app.run()` в кінець `main()`
-     # або запустити Flask окремо.
-     logger.info("Запуск Flask для локальної розробки...")
-     flask_app.run(host='0.0.0.0', port=PORT, debug=True) # debug=True для локальної розробки
+# --- Запуск програми ---
+# Цей блок тепер не потрібен, якщо Gunicorn запускає flask_app
+# if __name__ == '__main__':
+#     logger.info("Запуск main() для ініціалізації...")
+#     asyncio.run(main()) # Запускаємо асинхронну main
+#     logger.info("Запуск Flask для локальної розробки...")
+#     flask_app.run(host='0.0.0.0', port=PORT, debug=True)
+
+# Додаємо запуск main() перед тим, як Gunicorn почне слухати запити
+# Це гарантує, що вебхук спробує встановитися до першого запиту
+logger.info("Запуск асинхронної функції main() для ініціалізації бота та вебхука...")
+asyncio.run(main())
+logger.info("Ініціалізація завершена. Gunicorn може починати приймати запити.")
