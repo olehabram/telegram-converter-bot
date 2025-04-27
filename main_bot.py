@@ -1,4 +1,4 @@
-# main_bot.py (Webhook Version with Synchronous Init)
+# main_bot.py (Webhook Version with Synchronous Init - Fixed Handler Placement)
 import os
 import logging
 import asyncio
@@ -19,8 +19,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- Функції-обробники команд (start, help_command, convert_command, unknown) ---
-# --- Залишаються без змін з вашого попереднього коду ---
-# (Переконайтеся, що вони тут присутні)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Надсилає привітальне повідомлення при команді /start."""
     user = update.effective_user
@@ -184,20 +182,29 @@ def initialize_bot():
         logger.info("Створення екземпляру Telegram Application...")
         application_builder = ApplicationBuilder().token(BOT_TOKEN)
 
-        # Реєстрація обробників
-        application_builder.add_handler(CommandHandler("start", start))
-        application_builder.add_handler(CommandHandler("help", help_command))
-        application_builder.add_handler(CommandHandler("convert", convert_command))
-        application_builder.add_handler(MessageHandler(filters.COMMAND | filters.TEXT & ~filters.UpdateType.EDITED, unknown))
-        logger.info("Обробники додані до білдера.")
-
+        # Створюємо екземпляр Application СПОЧАТКУ
         application = application_builder.build()
         logger.info("Екземпляр Application створено.")
 
+        # ДОДАЄМО ОБРОБНИКИ ДО СТВОРЕНОГО application
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("convert", convert_command))
+        application.add_handler(MessageHandler(filters.COMMAND | filters.TEXT & ~filters.UpdateType.EDITED, unknown))
+        logger.info("Обробники додані до Application.") # Виправлено лог
+
         # Запускаємо асинхронну ініціалізацію та встановлення вебхука в тимчасовому циклі
         logger.info("Запуск синхронної ініціалізації та встановлення вебхука...")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Використовуємо get_event_loop для сумісності
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError: # Якщо немає поточного циклу
+             loop = asyncio.new_event_loop()
+             asyncio.set_event_loop(loop)
+
 
         logger.info("Виклик application.initialize()...")
         loop.run_until_complete(application.initialize())
@@ -211,8 +218,14 @@ def initialize_bot():
         else:
             logger.warning("Пропуск встановлення вебхука через відсутність WEBHOOK_URL.")
 
-        loop.close()
-        logger.info("Синхронна ініціалізація завершена. Тимчасовий цикл закрито.")
+        # Закриваємо цикл, лише якщо ми його створили
+        # if asyncio.get_event_loop() is loop:
+        #     loop.close()
+        #     logger.info("Синхронна ініціалізація завершена. Тимчасовий цикл закрито.")
+        # Краще не закривати цикл тут, щоб уникнути проблем з Gunicorn/Flask
+
+        logger.info("Синхронна ініціалізація завершена.")
+
 
     except Exception as e:
         logger.error(f"КРИТИЧНА ПОМИЛКА під час синхронної ініціалізації: {e}", exc_info=True)
@@ -292,3 +305,4 @@ def health_check():
     return "OK", 200
 
 # --- Немає потреби в main() чи asyncio.run() тут, Gunicorn запускає flask_app ---
+
