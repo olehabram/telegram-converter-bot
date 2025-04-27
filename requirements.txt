@@ -1,2 +1,6 @@
 requests
 python-telegram-bot
+requests
+python-telegram-bot[ext] # Додано [ext] для зручності з ApplicationBuilder
+Flask>=2.0 # Додано Flask
+gunicorn>=20.0 # Додано Gunicorn для запуску Flask у продакшені
