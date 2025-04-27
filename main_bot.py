@@ -1,4 +1,4 @@
-# main_bot.py (Webhook Version with Synchronous Init - Removed .initialized check)
+# main_bot.py (Webhook Version with Synchronous Init - Awaiting process_update)
 import os
 import logging
 import asyncio
@@ -22,24 +22,31 @@ logger = logging.getLogger(__name__)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Надсилає привітальне повідомлення при команді /start."""
     user = update.effective_user
-    # Додамо логування перед відправкою
     logger.info(f"Handling /start command for user {user.id}")
+    reply_content = (
+        f"Привіт, {user.mention_html()}!\n\n"
+        f"Я бот-конвертер. Допоможу тобі конвертувати валюти та одиниці виміру.\n\n"
+        f"<b>Як користуватися:</b>\n"
+        f"Надішли повідомлення у форматі:\n"
+        f"<code>/convert &lt;значення&gt; &lt;з_одиниці&gt; to &lt;в_одиницю&gt;</code>\n\n"
+        f"<b>Приклади:</b>\n"
+        f"<code>/convert 100 USD to UAH</code>\n"
+        f"<code>/convert 5 km to m</code>\n"
+        f"<code>/convert 10 kg to lb</code>\n\n"
+        f"Використовуй команду /help для довідки."
+    )
+    logger.debug(f"Preparing to send reply to user {user.id}") # Додатковий лог
     try:
-        await update.message.reply_html(
-            f"Привіт, {user.mention_html()}!\n\n"
-            f"Я бот-конвертер. Допоможу тобі конвертувати валюти та одиниці виміру.\n\n"
-            f"<b>Як користуватися:</b>\n"
-            f"Надішли повідомлення у форматі:\n"
-            f"<code>/convert &lt;значення&gt; &lt;з_одиниці&gt; to &lt;в_одиницю&gt;</code>\n\n"
-            f"<b>Приклади:</b>\n"
-            f"<code>/convert 100 USD to UAH</code>\n"
-            f"<code>/convert 5 km to m</code>\n"
-            f"<code>/convert 10 kg to lb</code>\n\n"
-            f"Використовуй команду /help для довідки.",
-        )
-        logger.info(f"Successfully replied to /start for user {user.id}")
+        await update.message.reply_html(reply_content)
+        logger.info(f"Successfully called reply_html for user {user.id}") # Змінено лог успіху
     except Exception as e:
-        logger.error(f"Error replying to /start for user {user.id}: {e}", exc_info=True)
+        # Логуємо помилку ДЕТАЛЬНО
+        logger.error(f"!!! EXCEPTION while replying to /start for user {user.id} !!!: {e}", exc_info=True)
+        # Спробуємо надіслати просте повідомлення про помилку
+        try:
+            await update.message.reply_text("Вибачте, сталася помилка при обробці команди /start.")
+        except Exception as inner_e:
+            logger.error(f"!!! FAILED even to send error message to user {user.id} !!!: {inner_e}", exc_info=True)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,8 +261,6 @@ async def webhook() -> Response:
         logger.error("Помилка: Глобальний екземпляр Telegram Application не ініціалізовано!")
         return Response(status=500)
 
-    # !!! ВИДАЛЕНО БЛОК ПЕРЕВІРКИ application.initialized !!!
-
     logger.debug("Обробка запиту на /webhook...")
     try:
         update_data = request.get_json()
@@ -266,12 +271,13 @@ async def webhook() -> Response:
         logger.info(f"Отримано оновлення: {update_data}")
         update = Update.de_json(update_data, application.bot)
 
-        # Запускаємо обробку оновлення
-        # Використовуємо create_task з поточного циклу подій
-        loop = asyncio.get_running_loop()
-        loop.create_task(application.process_update(update))
+        # Замість створення окремої таски – очікуємо виконання process_update
+        # Це може сповільнити відповідь, але може вирішити проблеми з event loop
+        logger.info("Очікування завершення application.process_update...") # Додано лог
+        await application.process_update(update)
+        logger.info("Завершено application.process_update.") # Додано лог
 
-        logger.debug("Завдання process_update створено. Надсилання відповіді 200 OK до Telegram.")
+        logger.debug("Обробка оновлення завершена. Надсилання відповіді 200 OK до Telegram.")
         return Response(status=200)
     except Exception as e:
         logger.error(f"Неочікувана помилка обробки оновлення вебхука: {e}", exc_info=True)
