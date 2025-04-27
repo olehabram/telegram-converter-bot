@@ -1,0 +1,16 @@
+# Папка віртуального середовища
+.venv/
+venv/
+
+# Кеш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Файл конфігурації з токеном (ВАЖЛИВО!)
+config.py 
+
+# Файли IDE (приклади для VS Code та PyCharm)
+.vscode/
+.idea/
