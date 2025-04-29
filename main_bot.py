@@ -1,4 +1,4 @@
-# main_bot.py (Webhook Version - ASGI Wrapper + Increased PTB Timeouts)
+# main_bot.py (Webhook Version - ASGI Wrapper + Increased PTB Timeouts - Correct Import)
 import os
 import logging
 import asyncio
@@ -6,9 +6,11 @@ from flask import Flask, request, Response
 from telegram import Update, Bot
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
-    ApplicationBuilder, ExtBot, Defaults # Додано Defaults
+    ApplicationBuilder, ExtBot, Defaults
 )
-from telegram.request import Request # Додано Request
+# --- ЗМІНЕНО ІМПОРТ ---
+from telegram.request import HTTPXRequest # Використовуємо HTTPXRequest
+# -----------------------
 from asgiref.wsgi import WsgiToAsgi
 
 # Імпортуємо СИНХРОННІ конвертери
@@ -16,6 +18,7 @@ import currency_converter
 import unit_converter
 
 # --- Налаштування логування ---
+# (Без змін)
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -28,16 +31,18 @@ logging.getLogger("asgiref").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- Змінні середовища ---
+# (Без змін)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 PORT = int(os.environ.get('PORT', 8080))
 
 # --- Глобальний об'єкт Application ---
+# (Без змін)
 application: Application | None = None
 initialization_error: Exception | None = None
 
 # --- Функції-обробники команд (start, help_command, convert_command, unknown) ---
-# (Код обробників залишається без змін, як у попередній "стабільній" версії)
+# (Без змін)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     logger.info(f"--> Entering /start handler for user {user.id}")
@@ -128,7 +133,6 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.debug(f"Unit conversion failed, attempting currency conversion for: {from_unit} -> {to_unit}")
         is_potential_currency = (len(from_unit) == 3 and from_unit.isalpha() and len(to_unit) == 3 and to_unit.isalpha())
         if is_potential_currency:
-            # Викликаємо СИНХРОННИЙ конвертер
             currency_result = currency_converter.convert_currency(amount, from_unit, to_unit)
             if currency_result is not None:
                 logger.info(f"Currency conversion successful: {amount} {from_unit} -> {currency_result} {to_unit}")
@@ -181,7 +185,7 @@ async def setup_bot_webhook(app: Application, webhook_url: str):
         logger.error(f"CRITICAL ERROR during set_webhook/get_webhook_info: {e}", exc_info=True)
         return False
 
-# --- ЗМІНЕНО: Ініціалізація програми (додано таймаути) ---
+# --- Ініціалізація програми (використовуємо HTTPXRequest) ---
 def initialize_telegram_app() -> Application | None:
     global initialization_error
     logger.info("Initializing Telegram Application...")
@@ -190,17 +194,13 @@ def initialize_telegram_app() -> Application | None:
         initialization_error = RuntimeError("BOT_TOKEN not found")
         return None
     try:
-        # Створюємо об'єкт Request зі збільшеними таймаутами (в секундах)
-        # connect_timeout: час на встановлення з'єднання
-        # read_timeout: час на очікування першого байту відповіді
-        # pool_timeout: час очікування вільного з'єднання з пулу
-        request_settings = Request(connect_timeout=10.0, read_timeout=20.0, pool_timeout=15.0)
+        # --- ЗМІНЕНО КЛАС ---
+        # Створюємо об'єкт HTTPXRequest зі збільшеними таймаутами
+        request_settings = HTTPXRequest(connect_timeout=10.0, read_timeout=20.0, pool_timeout=15.0)
+        # -------------------
         logger.info(f"Configured PTB Request with timeouts: connect={request_settings.connect_timeout}, read={request_settings.read_timeout}, pool={request_settings.pool_timeout}")
 
-        # Можна також встановити таймаути за замовчуванням для всіх методів API
-        # defaults = Defaults(timeout=20.0) # Загальний таймаут для операцій
-
-        builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings) # .defaults(defaults)
+        builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings)
         app = builder.build()
 
         logger.info("Telegram Application instance created.")
@@ -216,6 +216,7 @@ def initialize_telegram_app() -> Application | None:
         return None
 
 # --- Створення Flask App ---
+# (Без змін)
 _flask_app = Flask(__name__)
 
 # --- Асинхронна функція для запуску ---
@@ -315,4 +316,3 @@ logger.info("Flask app wrapped with WsgiToAsgi for ASGI compatibility.")
 #     import uvicorn
 #     logger.info("Starting Uvicorn development server (for local testing only)...")
 #     uvicorn.run("main_bot:asgi_app", host="0.0.0.0", port=PORT, log_level="info")
-
