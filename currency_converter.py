@@ -1,71 +1,92 @@
-# currency_converter.py
-# Переконайся, що бібліотека 'requests' встановлена: pip install requests
-import requests  # Імпортуємо бібліотеку для HTTP-запитів
-import json  # Імпортуємо бібліотеку для роботи з JSON
+# currency_converter.py (Async version)
+import requests  # Все ще потрібен для запитів
+import json
+import asyncio
+import concurrent.futures # Потрібен для ThreadPoolExecutor (хоча можна і None)
+from typing import Dict, Optional, Any # Для кращої типізації
 
-# URL для безкоштовного API ExchangeRate-API (з базовою валютою USD)
-# Ви можете змінити USD на EUR або іншу підтримувану базову валюту, якщо потрібно
-# Перевірте документацію API для доступних базових валют на безкоштовному плані
-API_URL = "https://open.er-api.com/v6/latest/USD"
+# URL для API
+API_URL_BASE = "https://open.er-api.com/v6/latest/"
 
-# Словник для кешування курсів, щоб не робити запит до API щоразу
-# Ключ - код базової валюти (наприклад, 'USD'), значення - словник курсів
-exchange_rates_cache = {}
+# Кеш залишається синхронним, доступ до нього швидкий
+exchange_rates_cache: Dict[str, Dict[str, float]] = {}
 
-
-def get_exchange_rates(base_currency="USD"):
+def _fetch_rates_sync(url: str, timeout: int) -> Optional[Dict[str, Any]]:
+    """Синхронна функція для виконання запиту requests.get.
+       Ця функція буде виконуватися в окремому потоці.
     """
-    Отримує курси валют відносно базової валюти з API або кешу.
+    print(f"[_fetch_rates_sync] Attempting to fetch from {url}...")
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()  # Перевірка на HTTP помилки
+        data = response.json()
+        print(f"[_fetch_rates_sync] Successfully fetched and parsed JSON.")
+        return data
+    except requests.exceptions.Timeout:
+        print(f"[_fetch_rates_sync] Error: Timeout fetching {url}")
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"[_fetch_rates_sync] Error: Network request failed: {e}")
+        return None
+    except json.JSONDecodeError:
+        print(f"[_fetch_rates_sync] Error: Failed to decode JSON response from {url}")
+        return None
+    except Exception as e:
+        # Логуємо інші неочікувані помилки
+        print(f"[_fetch_rates_sync] Unexpected error: {e}")
+        return None
+
+
+async def get_exchange_rates(base_currency: str = "USD") -> Optional[Dict[str, float]]:
+    """
+    Асинхронно отримує курси валют відносно базової валюти з API або кешу.
 
     Args:
         base_currency (str): Код базової валюти (за замовчуванням "USD").
 
     Returns:
         dict or None: Словник з курсами валют або None у разі помилки.
-                     Формат: {'USD': 1.0, 'EUR': 0.92, 'UAH': 39.5, ...}
     """
-    # Перевіряємо, чи є курси для цієї базової валюти в кеші
+    base_currency = base_currency.upper()
+    # Перевірка кешу (синхронна, бо швидка)
     if base_currency in exchange_rates_cache:
-        print(f"Використання кешованих курсів для {base_currency}")
+        print(f"Using cached rates for {base_currency}")
         return exchange_rates_cache[base_currency]
 
-    # Якщо в кеші немає, робимо запит до API
-    print(f"Отримання свіжих курсів для {base_currency} з API...")
-    url = f"https://open.er-api.com/v6/latest/{base_currency}"
+    # Якщо в кеші немає, виконуємо синхронний запит в екзекуторі
+    print(f"Fetching fresh rates for {base_currency} from API via executor...")
+    url = f"{API_URL_BASE}{base_currency}"
+    loop = asyncio.get_running_loop()
+
     try:
-        # Встановлюємо таймаут для запиту (наприклад, 10 секунд)
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()  # Перевіряємо на HTTP-помилки (4xx або 5xx)
-
-        data = response.json()
-
-        # Перевіряємо, чи запит був успішним і чи є ключ 'rates'
-        if data.get("result") == "success" and "rates" in data:
-            print("Курси успішно отримано.")
-            # Зберігаємо курси в кеш
-            exchange_rates_cache[base_currency] = data["rates"]
-            return data["rates"]
-        else:
-            print(f"Помилка у відповіді API: {data.get('error-type', 'Невідома помилка')}")
-            return None
-
-    except requests.exceptions.Timeout:
-        print(f"Помилка: Запит до API {url} перевищив час очікування.")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"Помилка мережевого запиту до API: {e}")
-        return None
-    except json.JSONDecodeError:
-        print("Помилка декодування відповіді API (не JSON).")
-        return None
+        # Використовуємо run_in_executor для запуску _fetch_rates_sync
+        # None означає використання стандартного ThreadPoolExecutor
+        data = await loop.run_in_executor(None, _fetch_rates_sync, url, 10) # 10 секунд таймаут
     except Exception as e:
-        print(f"Неочікувана помилка при отриманні курсів: {e}")
+        # Ловимо помилки, що могли виникнути при запуску/роботі екзекутора
+        print(f"[get_exchange_rates] Error running executor task: {e}")
+        data = None
+
+    if data is None:
+        print(f"Failed to fetch data for {base_currency} from API.")
+        return None
+
+    # Обробка отриманих даних
+    if data.get("result") == "success" and "rates" in data:
+        print(f"Rates for {base_currency} successfully obtained and validated.")
+        rates = data["rates"]
+        # Зберігаємо в кеш (синхронно)
+        exchange_rates_cache[base_currency] = rates
+        return rates
+    else:
+        error_type = data.get('error-type', 'Unknown API error')
+        print(f"API Error for {base_currency}: {error_type}")
         return None
 
 
-def convert_currency(amount, from_currency, to_currency):
+async def convert_currency(amount: float, from_currency: str, to_currency: str) -> Optional[float]:
     """
-    Конвертує суму з однієї валюти в іншу.
+    Асинхронно конвертує суму з однієї валюти в іншу.
 
     Args:
         amount (float): Сума для конвертації.
@@ -78,131 +99,104 @@ def convert_currency(amount, from_currency, to_currency):
     from_currency = from_currency.upper()
     to_currency = to_currency.upper()
 
-    # Якщо валюти однакові, конвертація не потрібна
     if from_currency == to_currency:
         return amount
 
-    # Спочатку отримуємо курси відносно базової валюти (USD за замовчуванням)
-    rates = get_exchange_rates()  # Використовуємо USD як базу
+    # Отримуємо курси асинхронно
+    print(f"Attempting to get rates relative to USD for {from_currency} -> {to_currency} conversion...")
+    rates_usd = await get_exchange_rates("USD")
 
-    if rates is None:
-        print("Не вдалося отримати курси валют.")
+    if rates_usd is None:
+        print("Failed to get base (USD) exchange rates.")
+        # Можна додати спробу отримати відносно from_currency, якщо потрібно
+        # print(f"Attempting to get rates relative to {from_currency}...")
+        # rates_alternative = await get_exchange_rates(from_currency)
+        # if rates_alternative and to_currency in rates_alternative:
+        #     rate = rates_alternative[to_currency]
+        #     print(f"Using alternative rate {from_currency} -> {to_currency}: {rate}")
+        #     return amount * rate
+        # else:
+        #     print(f"Failed to get alternative rates for {from_currency} -> {to_currency}.")
+        #     return None
+        return None # Поки що спрощуємо: якщо USD не вдалося, то помилка
+
+    # Перевіряємо наявність валют у курсах відносно USD
+    if from_currency not in rates_usd or to_currency not in rates_usd:
+        missing = [cur for cur in [from_currency, to_currency] if cur not in rates_usd]
+        print(f"Error: Currency codes {', '.join(missing)} not found in rates relative to USD.")
         return None
 
-    # Перевіряємо, чи існують потрібні валюти в отриманих курсах
-    if from_currency not in rates or to_currency not in rates:
-        missing = []
-        if from_currency not in rates:
-            missing.append(from_currency)
-        if to_currency not in rates:
-            missing.append(to_currency)
-        print(f"Помилка: Валюти {', '.join(missing)} не знайдено в курсах відносно USD.")
+    try:
+        # Розрахунок (цей код швидкий, залишаємо синхронним)
+        rate_from_usd = rates_usd[from_currency]
+        rate_to_usd = rates_usd[to_currency]
 
-        # Спробуємо отримати курси з базою from_currency, якщо вона не USD
-        # Це може допомогти, якщо API надає курси відносно інших баз
-        if from_currency != "USD":
-            print(f"Спроба отримати курси з базою {from_currency}...")
-            rates_alternative = get_exchange_rates(from_currency)
-            if rates_alternative and to_currency in rates_alternative:
-                rate = rates_alternative[to_currency]
-                print(f"Використано альтернативний курс {from_currency} -> {to_currency}: {rate}")
-                return amount * rate
-            else:
-                print(f"Не вдалося знайти курс для {to_currency} з базою {from_currency}.")
-                return None
-        else:
-            # Якщо from_currency була USD і її немає в списку (дуже дивно), або to_currency немає
+        if rate_from_usd == 0:
+            print(f"Error: Exchange rate for {from_currency} is zero.")
             return None
 
-    try:
-        # Конвертація через базову валюту (USD)
-        # Спочатку конвертуємо from_currency в USD
-        # rates[from_currency] - це скільки одиниць from_currency коштує 1 USD
-        # Щоб отримати суму в USD, треба поділити на цей курс
-        # Приклад: якщо курс USD/EUR = 0.9, то 1 USD = 0.9 EUR. Щоб 100 EUR перевести в USD: 100 / 0.9
-        if rates[from_currency] == 0:
-             print(f"Помилка: Курс для {from_currency} дорівнює нулю.")
-             return None
-        amount_in_usd = amount / rates[from_currency]
-
-        # Потім конвертуємо USD в to_currency
-        # rates[to_currency] - це скільки одиниць to_currency коштує 1 USD
-        # Щоб отримати суму в to_currency, треба помножити суму в USD на цей курс
-        converted_amount = amount_in_usd * rates[to_currency]
+        # Конвертація через USD: Amount / (From/USD) * (To/USD)
+        converted_amount = (amount / rate_from_usd) * rate_to_usd
+        print(f"Conversion successful: {amount} {from_currency} = {converted_amount} {to_currency}")
         return converted_amount
 
     except ZeroDivisionError:
-        # Ця помилка оброблена вище, але залишимо про всяк випадок
-        print(f"Помилка ділення на нуль при конвертації (курс для {from_currency} може бути 0).")
+        # Мало б бути оброблено перевіркою вище, але про всяк випадок
+        print(f"Error: Division by zero during conversion (rate for {from_currency} might be zero).")
         return None
     except KeyError as e:
-         print(f"Помилка: Валюта {e} не знайдена у внутрішніх розрахунках.")
+         # Також мало б бути оброблено перевіркою наявності вище
+         print(f"Error: Currency {e} not found during calculation step.")
          return None
     except Exception as e:
-        print(f"Неочікувана помилка під час конвертації: {e}")
+        print(f"Unexpected error during currency conversion calculation: {e}")
         return None
 
 
 # --- Приклад використання (для тестування) ---
+async def _test():
+    print("--- Async Currency Converter Tests ---")
+    # Тест 1: Отримання курсів USD
+    print("\n[Test 1] Getting USD rates...")
+    rates = await get_exchange_rates("USD")
+    if rates:
+        print("USD rates obtained (first 5):")
+        count = 0
+        for cur, rate in rates.items():
+            print(f"  {cur}: {rate}")
+            count += 1
+            if count >= 5: break
+    else:
+        print("Failed to get USD rates.")
+
+    # Тест 2: Конвертація USD -> UAH
+    print("\n[Test 2] Converting USD to UAH...")
+    result = await convert_currency(100, "USD", "UAH")
+    if result is not None:
+        print(f"Result: 100 USD = {result:.2f} UAH")
+    else:
+        print("Failed to convert USD to UAH.")
+
+    # Тест 3: Конвертація EUR -> GBP (використає кеш USD)
+    print("\n[Test 3] Converting EUR to GBP...")
+    result = await convert_currency(100, "EUR", "GBP")
+    if result is not None:
+        print(f"Result: 100 EUR = {result:.2f} GBP")
+    else:
+        print("Failed to convert EUR to GBP.")
+
+    # Тест 4: Використання кешу
+    print("\n[Test 4] Getting USD rates again (should use cache)...")
+    rates_cached = await get_exchange_rates("USD")
+    if rates_cached:
+        print("USD rates obtained again (likely from cache).")
+
+    # Тест 5: Неіснуюча валюта
+    print("\n[Test 5] Converting USD to XYZ...")
+    result = await convert_currency(100, "USD", "XYZ")
+    if result is None:
+        print("Failed to convert USD to XYZ (expected).")
+
 if __name__ == "__main__":
-    # Тест 1: Отримання курсів
-    print("--- Тест отримання курсів ---")
-    rates_usd = get_exchange_rates("USD")
-    if rates_usd:
-        print("Курси відносно USD (перші 5):")
-        count = 0
-        for currency, rate in rates_usd.items():
-            print(f"  {currency}: {rate}")
-            count += 1
-            if count >= 5:
-                break
-    else:
-        print("Не вдалося отримати курси USD.")
-
-    print("\n--- Тест конвертації ---")
-    # Тест 2: Конвертація
-    amount_to_convert = 100
-    from_curr = "USD"
-    to_curr = "UAH"
-    result = convert_currency(amount_to_convert, from_curr, to_curr)
-    if result is not None:
-        print(f"{amount_to_convert} {from_curr} = {result:.2f} {to_curr}")
-    else:
-        print(f"Не вдалося конвертувати {from_curr} в {to_curr}")
-
-    # Тест 3: Інша пара
-    from_curr = "EUR"
-    to_curr = "GBP"
-    result = convert_currency(amount_to_convert, from_curr, to_curr)
-    if result is not None:
-        print(f"{amount_to_convert} {from_curr} = {result:.2f} {to_curr}")
-    else:
-        print(f"Не вдалося конвертувати {from_curr} в {to_curr}")
-
-    # Тест 4: Неіснуюча валюта
-    from_curr = "USD"
-    to_curr = "XYZ"
-    result = convert_currency(amount_to_convert, from_curr, to_curr)
-    if result is not None:
-        print(f"{amount_to_convert} {from_curr} = {result:.2f} {to_curr}")
-    else:
-        print(f"Не вдалося конвертувати {from_curr} в {to_curr} (очікувана помилка)")
-
-    # Тест 5: Використання кешу
-    print("\n--- Тест використання кешу ---")
-    rates_usd_cached = get_exchange_rates("USD")  # Має використати кеш
-    if rates_usd_cached:
-        print("Курси USD отримано (ймовірно, з кешу).")
-
-    # Тест 6: Отримання курсів для іншої бази
-    rates_eur = get_exchange_rates("EUR")
-    if rates_eur:
-        print("Курси відносно EUR (перші 5):")
-        count = 0
-        for currency, rate in rates_eur.items():
-            print(f"  {currency}: {rate}")
-            count += 1
-            if count >= 5:
-                break
-    else:
-        print("Не вдалося отримати курси EUR.")
+    # Запускаємо асинхронні тести
+    asyncio.run(_test())
