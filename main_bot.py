@@ -1,13 +1,17 @@
-# main_bot.py (Webhook Version - Refactored Initialization + ASGI Wrapper)
+# main_bot.py (Webhook Version - ASGI Wrapper + Increased PTB Timeouts)
 import os
 import logging
 import asyncio
 from flask import Flask, request, Response
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ApplicationBuilder, ExtBot
-from asgiref.wsgi import WsgiToAsgi # Потрібно для обгортки
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ContextTypes,
+    ApplicationBuilder, ExtBot, Defaults # Додано Defaults
+)
+from telegram.request import Request # Додано Request
+from asgiref.wsgi import WsgiToAsgi
 
-# Імпортуємо наші конвертери (обидва синхронні в цій версії)
+# Імпортуємо СИНХРОННІ конвертери
 import currency_converter
 import unit_converter
 
@@ -19,9 +23,8 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
 logging.getLogger("telegram.bot").setLevel(logging.INFO)
-logging.getLogger("asyncio").setLevel(logging.INFO)
-logging.getLogger("asgiref").setLevel(logging.WARNING) # Зменшуємо логування asgiref
-
+logging.getLogger("asyncio").setLevel(logging.WARNING)
+logging.getLogger("asgiref").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- Змінні середовища ---
@@ -34,11 +37,10 @@ application: Application | None = None
 initialization_error: Exception | None = None
 
 # --- Функції-обробники команд (start, help_command, convert_command, unknown) ---
-
+# (Код обробників залишається без змін, як у попередній "стабільній" версії)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Надсилає привітальне повідомлення при команді /start."""
     user = update.effective_user
-    logger.info(f"--> Entering /start handler for user {user.id}") # Лог входу
+    logger.info(f"--> Entering /start handler for user {user.id}")
     reply_content = (
         f"Привіт, {user.mention_html()}!\n\n"
         f"Я бот-конвертер. Допоможу тобі конвертувати валюти та одиниці виміру.\n\n"
@@ -51,22 +53,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<code>/convert 10 kg to lb</code>\n\n"
         f"Використовуй команду /help для довідки."
     )
-    logger.debug(f"Preparing to send /start reply to user {user.id}")
     try:
         await update.message.reply_html(reply_content)
-        logger.info(f"<-- Successfully sent /start reply to user {user.id}") # Лог успіху
+        logger.info(f"<-- Successfully sent /start reply to user {user.id}")
     except Exception as e:
         logger.error(f"!!! EXCEPTION while sending /start reply to user {user.id} !!!: {e}", exc_info=True)
-        try:
-            await update.message.reply_text("Вибачте, сталася помилка при обробці команди /start.")
-        except Exception as inner_e:
-            logger.error(f"!!! FAILED even to send error message for /start to user {user.id} !!!: {inner_e}", exc_info=True)
-
+        try: await update.message.reply_text("Вибачте, сталася помилка при обробці команди /start.")
+        except Exception: pass
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Надсилає довідкове повідомлення при команді /help."""
     user_id = update.effective_user.id
-    logger.info(f"--> Entering /help handler for user {user_id}") # Лог входу
+    logger.info(f"--> Entering /help handler for user {user_id}")
     help_text = (
         "<b>Інструкція з використання:</b>\n\n"
         "Щоб конвертувати, надішли команду у форматі:\n"
@@ -78,104 +75,71 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  <code>/convert 2.5 l to ml</code>      (об'єм)\n\n"
         "<b>Підтримувані валюти (деякі):</b> USD, EUR, UAH, GBP, PLN, CAD, JPY тощо (список може змінюватися залежно від API).\n\n"
         "<b>Підтримувані одиниці:</b>\n"
-        "  Довжина: mm, cm, m, km, in, ft, yd, mi\n" # yd вже є
+        "  Довжина: mm, cm, m, km, in, ft, yd, mi\n"
         "  Маса: mg, g, kg, t, oz, lb\n"
         "  Об'єм: ml, l, m3, gal\n\n"
-        "<b>Важливо:</b> Конвертація можлива тільки в межах однієї категорії (наприклад, метри в кілометри, але не кілограми в метри)."
+        "<b>Важливо:</b> Конвертація можлива тільки в межах однієї категорії."
     )
-    logger.debug(f"Preparing to send /help reply to user {user_id}")
     try:
         await update.message.reply_html(help_text)
-        logger.info(f"<-- Successfully sent /help reply to user {user_id}") # Лог успіху
+        logger.info(f"<-- Successfully sent /help reply to user {user_id}")
     except Exception as e:
         logger.error(f"!!! EXCEPTION while sending /help reply to user {user_id} !!!: {e}", exc_info=True)
-        try:
-            await update.message.reply_text("Вибачте, сталася помилка при обробці команди /help.")
-        except Exception as inner_e:
-            logger.error(f"!!! FAILED even to send error message for /help to user {user_id} !!!: {inner_e}", exc_info=True)
-
+        try: await update.message.reply_text("Вибачте, сталася помилка при обробці команди /help.")
+        except Exception: pass
 
 async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обробляє команду конвертації (викликає СИНХРОННИЙ currency_converter)."""
     args = context.args
     user_id = update.effective_user.id
     logger.info(f"--> Entering /convert handler for user {user_id} with args: {args}")
 
     if not args or len(args) < 3 or args[-2].lower() != 'to':
         logger.warning(f"Invalid /convert format from user {user_id}. Args: {args}")
-        try:
-            await update.message.reply_text(
-                "Неправильний формат команди. \n"
-                "Використовуйте: `/convert <значення> <з_одиниці> to <в_одиницю>`\n"
-                "Приклад: `/convert 100 USD to UAH`\n"
-                "Спробуйте /help для довідки.",
-            )
-        except Exception as e:
-             logger.error(f"Error sending format error message for /convert to user {user_id}: {e}", exc_info=True)
+        try: await update.message.reply_text("Неправильний формат команди. Використовуйте: `/convert <значення> <з_одиниці> to <в_одиницю>`\nПриклад: `/convert 100 USD to UAH`\nСпробуйте /help.")
+        except Exception: pass
         return
 
     try:
         amount_str = args[0]
         from_unit = args[1]
         to_unit = args[-1]
-        if len(args) > 4:
-             from_unit = " ".join(args[1:-2])
+        if len(args) > 4: from_unit = " ".join(args[1:-2])
         amount = float(amount_str.replace(',', '.'))
     except ValueError:
         logger.warning(f"Invalid number format '{amount_str}' from user {user_id}")
-        try:
-            await update.message.reply_text(f"Помилка: '{amount_str}' не є дійсним числом.")
-        except Exception as e:
-            logger.error(f"Error sending ValueError message for /convert to user {user_id}: {e}", exc_info=True)
+        try: await update.message.reply_text(f"Помилка: '{amount_str}' не є дійсним числом.")
+        except Exception: pass
         return
     except Exception as e:
         logger.error(f"Unexpected error parsing /convert args for user {user_id}: {e}", exc_info=True)
-        try:
-            await update.message.reply_text("Виникла помилка при обробці вашого запиту.")
+        try: await update.message.reply_text("Виникла помилка при обробці вашого запиту.")
         except Exception: pass
         return
 
     reply_text = ""
     logger.debug(f"Attempting unit conversion for: {amount} {from_unit} -> {to_unit}")
-    # Конвертер одиниць синхронний і швидкий
     unit_result = unit_converter.convert_units(amount, from_unit, to_unit)
 
     if unit_result is not None:
         logger.info(f"Unit conversion successful: {amount} {from_unit} -> {unit_result} {to_unit}")
-        if unit_result == int(unit_result):
-             reply_text = f"{amount} {from_unit.upper()} = {int(unit_result)} {to_unit.upper()}"
-        else:
-             reply_text = f"{amount} {from_unit.upper()} = {unit_result:.4f} {to_unit.upper()}"
+        if unit_result == int(unit_result): reply_text = f"{amount} {from_unit.upper()} = {int(unit_result)} {to_unit.upper()}"
+        else: reply_text = f"{amount} {from_unit.upper()} = {unit_result:.4f} {to_unit.upper()}"
     else:
-        # Якщо не одиниця, спробуємо як валюту (синхронно)
         logger.debug(f"Unit conversion failed, attempting currency conversion for: {from_unit} -> {to_unit}")
-        is_potential_currency = (
-            len(from_unit) == 3 and from_unit.isalpha() and
-            len(to_unit) == 3 and to_unit.isalpha()
-        )
+        is_potential_currency = (len(from_unit) == 3 and from_unit.isalpha() and len(to_unit) == 3 and to_unit.isalpha())
         if is_potential_currency:
-            # --- ВИКЛИКАЄМО СИНХРОННИЙ КОНВЕРТЕР ВАЛЮТ ---
-            # (Без await, бо функція синхронна)
+            # Викликаємо СИНХРОННИЙ конвертер
             currency_result = currency_converter.convert_currency(amount, from_unit, to_unit)
-            # ---------------------------------------------
             if currency_result is not None:
                 logger.info(f"Currency conversion successful: {amount} {from_unit} -> {currency_result} {to_unit}")
                 reply_text = f"{amount} {from_unit.upper()} = {currency_result:.2f} {to_unit.upper()}"
             else:
                 logger.warning(f"Currency conversion failed for {from_unit} -> {to_unit}")
-                reply_text = (
-                    f"Не вдалося конвертувати валюту {from_unit.upper()} в {to_unit.upper()}.\n"
-                    f"Перевірте правильність кодів валют або спробуйте /help."
-                )
+                reply_text = f"Не вдалося конвертувати валюту {from_unit.upper()} в {to_unit.upper()}.\nПеревірте правильність кодів валют або спробуйте /help."
         else:
-            # Якщо не схоже на валюту і не одиниця виміру
             logger.warning(f"Could not recognize units/currency: '{from_unit}' or '{to_unit}'")
-            reply_text = (
-                f"Не вдалося розпізнати одиниці/валюти: '{from_unit}' або '{to_unit}'.\n"
-                f"Перевірте правильність написання або спробуйте /help."
-            )
+            reply_text = f"Не вдалося розпізнати одиниці/валюти: '{from_unit}' або '{to_unit}'.\nПеревірте правильність написання або спробуйте /help."
 
-    logger.debug(f"Preparing to send /convert result to user {user_id}: '{reply_text}'")
     try:
         await update.message.reply_text(reply_text)
         logger.info(f"<-- Successfully sent /convert reply to user {user_id}")
@@ -184,17 +148,16 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробляє невідомі команди або звичайний текст."""
     user_id = update.effective_chat.id
-    logger.info(f"--> Handling unknown command/text for chat {user_id}") # Лог входу
+    logger.info(f"--> Handling unknown command/text for chat {user_id}")
     try:
-        await context.bot.send_message(chat_id=user_id,
-                                    text="Вибачте, я не розумію цю команду. Спробуйте /help.")
+        await context.bot.send_message(chat_id=user_id, text="Вибачте, я не розумію цю команду. Спробуйте /help.")
         logger.info(f"<-- Sent 'unknown command' message to chat {user_id}")
     except Exception as e:
         logger.error(f"!!! EXCEPTION sending 'unknown command' message to chat {user_id} !!!: {e}", exc_info=True)
 
 # --- Асинхронна функція для встановлення вебхука ---
+# (Без змін)
 async def setup_bot_webhook(app: Application, webhook_url: str):
     logger.info(f"Attempting to set webhook to URL: {webhook_url}")
     if not webhook_url:
@@ -218,7 +181,7 @@ async def setup_bot_webhook(app: Application, webhook_url: str):
         logger.error(f"CRITICAL ERROR during set_webhook/get_webhook_info: {e}", exc_info=True)
         return False
 
-# --- Ініціалізація програми ---
+# --- ЗМІНЕНО: Ініціалізація програми (додано таймаути) ---
 def initialize_telegram_app() -> Application | None:
     global initialization_error
     logger.info("Initializing Telegram Application...")
@@ -227,12 +190,23 @@ def initialize_telegram_app() -> Application | None:
         initialization_error = RuntimeError("BOT_TOKEN not found")
         return None
     try:
-        builder = ApplicationBuilder().token(BOT_TOKEN)
+        # Створюємо об'єкт Request зі збільшеними таймаутами (в секундах)
+        # connect_timeout: час на встановлення з'єднання
+        # read_timeout: час на очікування першого байту відповіді
+        # pool_timeout: час очікування вільного з'єднання з пулу
+        request_settings = Request(connect_timeout=10.0, read_timeout=20.0, pool_timeout=15.0)
+        logger.info(f"Configured PTB Request with timeouts: connect={request_settings.connect_timeout}, read={request_settings.read_timeout}, pool={request_settings.pool_timeout}")
+
+        # Можна також встановити таймаути за замовчуванням для всіх методів API
+        # defaults = Defaults(timeout=20.0) # Загальний таймаут для операцій
+
+        builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings) # .defaults(defaults)
         app = builder.build()
+
         logger.info("Telegram Application instance created.")
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("help", help_command))
-        app.add_handler(CommandHandler("convert", convert_command)) # Викликає оновлену async convert_command
+        app.add_handler(CommandHandler("convert", convert_command))
         app.add_handler(MessageHandler(filters.COMMAND | filters.TEXT & ~filters.UpdateType.EDITED, unknown))
         logger.info("Command and message handlers added.")
         return app
@@ -242,13 +216,14 @@ def initialize_telegram_app() -> Application | None:
         return None
 
 # --- Створення Flask App ---
-_flask_app = Flask(__name__) # Створюємо оригінальний Flask app
+_flask_app = Flask(__name__)
 
-# --- Асинхронна функція для запуску перед першим запитом ---
+# --- Асинхронна функція для запуску ---
+# (Без змін)
 async def startup():
     global application, initialization_error
     logger.info("Running async startup tasks...")
-    application = initialize_telegram_app()
+    application = initialize_telegram_app() # Викликає оновлену функцію
     if application:
         logger.info("Initializing Telegram Application object...")
         try:
@@ -268,6 +243,7 @@ async def startup():
     logger.info("Async startup tasks finished.")
 
 # Запускаємо асинхронну ініціалізацію
+# (Без змін)
 try:
     logger.info("Starting asyncio.run(startup())...")
     asyncio.run(startup())
@@ -279,6 +255,7 @@ except Exception as e:
      _flask_app.config['TELEGRAM_APP'] = None
 
 # --- Обробники Flask (маршрути) ---
+# (Без змін)
 @_flask_app.route("/webhook", methods=["POST"])
 async def webhook() -> Response:
     current_app = _flask_app.config.get('TELEGRAM_APP')
@@ -300,7 +277,6 @@ async def webhook() -> Response:
         update = Update.de_json(update_data, current_app.bot)
         logger.debug(f"Update deserialized successfully for update_id: {update.update_id}")
         logger.info(f"Calling application.process_update for update_id: {update.update_id}...")
-        # Важливо: process_update сам обробляє винятки всередині обробників
         await current_app.process_update(update)
         logger.info(f"Finished application.process_update for update_id: {update.update_id}.")
         logger.debug("<-- Finished processing /webhook request. Sending 200 OK.")
@@ -310,9 +286,7 @@ async def webhook() -> Response:
         try:
             if isinstance(update_data, dict): update_id = update_data.get('update_id', 'N/A')
         except Exception: pass
-        # Логуємо несподівану помилку на рівні самого вебхука
         logger.error(f"!!! UNEXPECTED ERROR processing webhook update (update_id: {update_id}) !!!: {e}", exc_info=True)
-        # Все одно повертаємо 200, щоб Telegram не повторював запит
         return Response(status=200)
 
 @_flask_app.route("/")
@@ -331,11 +305,14 @@ def health_check():
         return "OK", 200
 
 # --- Створюємо ASGI-сумісний додаток ---
+# (Без змін)
 asgi_app = WsgiToAsgi(_flask_app)
 logger.info("Flask app wrapped with WsgiToAsgi for ASGI compatibility.")
 
-# --- Запуск (для локального тестування, не для Gunicorn) ---
+# --- Запуск (для локального тестування) ---
+# (Без змін)
 # if __name__ == "__main__":
 #     import uvicorn
 #     logger.info("Starting Uvicorn development server (for local testing only)...")
 #     uvicorn.run("main_bot:asgi_app", host="0.0.0.0", port=PORT, log_level="info")
+
