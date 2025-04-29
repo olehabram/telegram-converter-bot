@@ -1,5 +1,6 @@
 requests
 python-telegram-bot[ext]>=20.0 # Вказуємо версію для стабільності
-Flask[async]>=2.3 # Використовуємо новішу версію Flask, якщо можливо
+Flask[async]>=3.1 # Використовуємо новішу версію Flask, якщо можливо
 gunicorn>=20.0
 uvicorn>=0.17 # Додано для асинхронного воркера Gunicorn
+asgiref>=3.8.1 # Додано для WSGI -> ASGI обгортки
