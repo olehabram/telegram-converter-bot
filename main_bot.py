@@ -1,28 +1,28 @@
-# main_bot.py (Webhook Version - ASGI Wrapper + Increased PTB Timeouts - Correct Import)
+# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency)
 import os
 import logging
 import asyncio
 from flask import Flask, request, Response
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes,
-    ApplicationBuilder, ExtBot, Defaults
+    Application, CommandHandler, MessageHandler,
+    filters, ContextTypes, ApplicationBuilder
 )
-# --- ЗМІНЕНО ІМПОРТ ---
-from telegram.request import HTTPXRequest # Використовуємо HTTPXRequest
-# -----------------------
+# Використовуємо HTTPXRequest для налаштування таймаутів
+from telegram.request import HTTPXRequest
+# Використовуємо WsgiToAsgi для сумісності Flask з ASGI сервером (Uvicorn)
 from asgiref.wsgi import WsgiToAsgi
 
-# Імпортуємо СИНХРОННІ конвертери
-import currency_converter
-import unit_converter
+# Імпортуємо конвертери
+import currency_converter # Потрібна АСИНХРОННА версія цього файлу!
+import unit_converter     # Цей залишається синхронним
 
 # --- Налаштування логування ---
-# (Без змін)
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO # DEBUG для детальніших логів
 )
+# Зменшуємо "шум" від бібліотек
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext").setLevel(logging.INFO)
 logging.getLogger("telegram.bot").setLevel(logging.INFO)
@@ -31,19 +31,18 @@ logging.getLogger("asgiref").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # --- Змінні середовища ---
-# (Без змін)
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 PORT = int(os.environ.get('PORT', 8080))
 
-# --- Глобальний об'єкт Application ---
-# (Без змін)
+# --- Глобальні змінні ---
 application: Application | None = None
 initialization_error: Exception | None = None
 
-# --- Функції-обробники команд (start, help_command, convert_command, unknown) ---
-# (Без змін)
+# --- Обробники команд ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обробник команди /start."""
     user = update.effective_user
     logger.info(f"--> Entering /start handler for user {user.id}")
     reply_content = (
@@ -55,18 +54,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"<b>Приклади:</b>\n"
         f"<code>/convert 100 USD to UAH</code>\n"
         f"<code>/convert 5 km to m</code>\n"
-        f"<code>/convert 10 kg to lb</code>\n\n"
+        f"<code>/convert 15 yd to ft</code>\n\n"
         f"Використовуй команду /help для довідки."
     )
     try:
         await update.message.reply_html(reply_content)
         logger.info(f"<-- Successfully sent /start reply to user {user.id}")
     except Exception as e:
+        # Логуємо помилку ВІДПРАВКИ відповіді
         logger.error(f"!!! EXCEPTION while sending /start reply to user {user.id} !!!: {e}", exc_info=True)
-        try: await update.message.reply_text("Вибачте, сталася помилка при обробці команди /start.")
-        except Exception: pass
+        # Не намагаємось відправити ще одне повідомлення про помилку,
+        # бо воно, ймовірно, теж не пройде, якщо є проблема з мережею/циклом
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обробник команди /help."""
     user_id = update.effective_user.id
     logger.info(f"--> Entering /help handler for user {user_id}")
     help_text = (
@@ -90,229 +91,280 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.info(f"<-- Successfully sent /help reply to user {user_id}")
     except Exception as e:
         logger.error(f"!!! EXCEPTION while sending /help reply to user {user_id} !!!: {e}", exc_info=True)
-        try: await update.message.reply_text("Вибачте, сталася помилка при обробці команди /help.")
-        except Exception: pass
 
 async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обробник команди /convert."""
     args = context.args
     user_id = update.effective_user.id
     logger.info(f"--> Entering /convert handler for user {user_id} with args: {args}")
 
+    # Перевірка формату
     if not args or len(args) < 3 or args[-2].lower() != 'to':
         logger.warning(f"Invalid /convert format from user {user_id}. Args: {args}")
-        try: await update.message.reply_text("Неправильний формат команди. Використовуйте: `/convert <значення> <з_одиниці> to <в_одиницю>`\nПриклад: `/convert 100 USD to UAH`\nСпробуйте /help.")
-        except Exception: pass
+        try:
+            await update.message.reply_text(
+                "Неправильний формат. Використовуйте: `/convert <значення> <з> to <в>`\n"
+                "Приклад: `/convert 100 USD to UAH`"
+            )
+        except Exception as e:
+            logger.error(f"Error sending format error message for /convert to user {user_id}: {e}", exc_info=True)
         return
 
+    # Парсинг аргументів
     try:
         amount_str = args[0]
         from_unit = args[1]
         to_unit = args[-1]
-        if len(args) > 4: from_unit = " ".join(args[1:-2])
+        # Якщо одиниця складається з кількох слів (малоймовірно, але можливо)
+        if len(args) > 4:
+            from_unit = ' '.join(args[1:-2])
         amount = float(amount_str.replace(',', '.'))
     except ValueError:
         logger.warning(f"Invalid number format '{amount_str}' from user {user_id}")
-        try: await update.message.reply_text(f"Помилка: '{amount_str}' не є дійсним числом.")
-        except Exception: pass
+        try:
+            await update.message.reply_text(f"Помилка: '{amount_str}' не є дійсним числом.")
+        except Exception as e:
+            logger.error(f"Error sending ValueError message for /convert to user {user_id}: {e}", exc_info=True)
         return
-    except Exception as e:
+    except Exception as e: # Інші можливі помилки парсингу
         logger.error(f"Unexpected error parsing /convert args for user {user_id}: {e}", exc_info=True)
-        try: await update.message.reply_text("Виникла помилка при обробці вашого запиту.")
-        except Exception: pass
+        try:
+            await update.message.reply_text("Виникла помилка при обробці вашого запиту.")
+        except Exception as e_reply:
+             logger.error(f"Error sending generic parsing error message to user {user_id}: {e_reply}", exc_info=True)
         return
 
     reply_text = ""
+    conversion_done = False
+
+    # 1. Спроба конвертації одиниць (синхронна функція)
     logger.debug(f"Attempting unit conversion for: {amount} {from_unit} -> {to_unit}")
     unit_result = unit_converter.convert_units(amount, from_unit, to_unit)
-
     if unit_result is not None:
         logger.info(f"Unit conversion successful: {amount} {from_unit} -> {unit_result} {to_unit}")
-        if unit_result == int(unit_result): reply_text = f"{amount} {from_unit.upper()} = {int(unit_result)} {to_unit.upper()}"
-        else: reply_text = f"{amount} {from_unit.upper()} = {unit_result:.4f} {to_unit.upper()}"
-    else:
+        if unit_result == int(unit_result):
+            reply_text = f"{amount} {from_unit.upper()} = {int(unit_result)} {to_unit.upper()}"
+        else:
+            reply_text = f"{amount} {from_unit.upper()} = {unit_result:.4f} {to_unit.upper()}"
+        conversion_done = True
+
+    # 2. Якщо не одиниці, спроба конвертації валют (асинхронна функція)
+    if not conversion_done:
         logger.debug(f"Unit conversion failed, attempting currency conversion for: {from_unit} -> {to_unit}")
         is_potential_currency = (len(from_unit) == 3 and from_unit.isalpha() and len(to_unit) == 3 and to_unit.isalpha())
         if is_potential_currency:
-            currency_result = currency_converter.convert_currency(amount, from_unit, to_unit)
-            if currency_result is not None:
-                logger.info(f"Currency conversion successful: {amount} {from_unit} -> {currency_result} {to_unit}")
-                reply_text = f"{amount} {from_unit.upper()} = {currency_result:.2f} {to_unit.upper()}"
-            else:
-                logger.warning(f"Currency conversion failed for {from_unit} -> {to_unit}")
-                reply_text = f"Не вдалося конвертувати валюту {from_unit.upper()} в {to_unit.upper()}.\nПеревірте правильність кодів валют або спробуйте /help."
+            try:
+                # --- ВИКЛИКАЄМО АСИНХРОННИЙ КОНВЕРТЕР ВАЛЮТ ---
+                currency_result = await currency_converter.convert_currency(amount, from_unit, to_unit)
+                # ---------------------------------------------
+                if currency_result is not None:
+                    # Лог успіху вже є всередині convert_currency
+                    reply_text = f"{amount} {from_unit.upper()} = {currency_result:.2f} {to_unit.upper()}"
+                    conversion_done = True
+                else:
+                    # Лог помилки вже є всередині convert_currency або get_exchange_rates
+                    logger.warning(f"Currency conversion function returned None for {from_unit} -> {to_unit}")
+                    reply_text = (
+                        f"Не вдалося конвертувати валюту {from_unit.upper()} в {to_unit.upper()}.\n"
+                        f"Перевірте правильність кодів валют або спробуйте /help."
+                    )
+            except Exception as e:
+                logger.error(f"!!! EXCEPTION during currency conversion call for user {user_id} !!!: {e}", exc_info=True)
+                reply_text = "Виникла внутрішня помилка при конвертації валюти."
         else:
-            logger.warning(f"Could not recognize units/currency: '{from_unit}' or '{to_unit}'")
-            reply_text = f"Не вдалося розпізнати одиниці/валюти: '{from_unit}' або '{to_unit}'.\nПеревірте правильність написання або спробуйте /help."
+             # Якщо не схоже на валюту і не одиниця виміру
+            logger.warning(f"Could not recognize units/currency: '{from_unit}' or '{to_unit}' for user {user_id}")
+            reply_text = (
+                f"Не вдалося розпізнати одиниці/валюти: '{from_unit}' або '{to_unit}'.\n"
+                f"Перевірте правильність написання або спробуйте /help."
+            )
 
+    # Надсилаємо фінальну відповідь
     try:
         await update.message.reply_text(reply_text)
         logger.info(f"<-- Successfully sent /convert reply to user {user_id}")
     except Exception as e:
-        logger.error(f"!!! EXCEPTION while sending /convert reply to user {user_id} !!!: {e}", exc_info=True)
+        logger.error(f"!!! EXCEPTION while sending final /convert reply to user {user_id} !!!: {e}", exc_info=True)
 
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_chat.id
-    logger.info(f"--> Handling unknown command/text for chat {user_id}")
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обробник для невідомих команд або простого тексту."""
+    # Цей обробник спрацює, якщо жоден CommandHandler не підійшов
+    logger.info(f"--> Handling unknown command/text from chat {update.effective_chat.id}")
     try:
-        await context.bot.send_message(chat_id=user_id, text="Вибачте, я не розумію цю команду. Спробуйте /help.")
-        logger.info(f"<-- Sent 'unknown command' message to chat {user_id}")
+        await update.message.reply_text("Невідома команда або формат. Спробуйте /help.")
+        logger.info(f"<-- Sent 'unknown command' message to chat {update.effective_chat.id}")
     except Exception as e:
-        logger.error(f"!!! EXCEPTION sending 'unknown command' message to chat {user_id} !!!: {e}", exc_info=True)
+        logger.error(f"!!! EXCEPTION sending 'unknown command' message to chat {update.effective_chat.id} !!!: {e}", exc_info=True)
 
-# --- Асинхронна функція для встановлення вебхука ---
-# (Без змін)
-async def setup_bot_webhook(app: Application, webhook_url: str):
-    logger.info(f"Attempting to set webhook to URL: {webhook_url}")
-    if not webhook_url:
-        logger.error("CRITICAL: WEBHOOK_URL is empty! Cannot set webhook.")
+# --- Налаштування вебхука ---
+async def setup_webhook(app: Application, url: str) -> bool:
+    """Встановлює вебхук для бота."""
+    if not url:
+        logger.error("WEBHOOK_URL не задано в змінних середовища!")
         return False
+    logger.info(f"Attempting to set webhook to URL: {url}")
     try:
-        await app.bot.set_webhook(url=webhook_url, allowed_updates=Update.ALL_TYPES)
-        webhook_info = await app.bot.get_webhook_info()
-        if webhook_info.url == webhook_url:
-            logger.info(f"Webhook successfully set to {webhook_info.url}")
-            if webhook_info.last_error_date:
-                 logger.warning(f"Webhook info reports previous error date: {webhook_info.last_error_date}, message: {webhook_info.last_error_message}")
+        await app.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES)
+        info = await app.bot.get_webhook_info()
+        if info.url == url:
+            logger.info(f"Webhook successfully set to {info.url}")
+            if info.last_error_date:
+                 logger.warning(f"Webhook info reports previous error date: {info.last_error_date}, message: {info.last_error_message}")
             return True
         else:
-            logger.error(f"Failed to set webhook. Current URL: '{webhook_info.url}', Expected: '{webhook_url}'")
-            logger.info("Attempting to delete existing webhook...")
-            if await app.bot.delete_webhook(): logger.info("Existing webhook deleted.")
-            else: logger.warning("Failed to delete existing webhook.")
+            logger.error(f"Failed to set webhook. Current URL: '{info.url}', Expected: '{url}'")
             return False
     except Exception as e:
         logger.error(f"CRITICAL ERROR during set_webhook/get_webhook_info: {e}", exc_info=True)
         return False
 
-# --- Ініціалізація програми (використовуємо HTTPXRequest) ---
+# --- Ініціалізація Telegram Application ---
 def initialize_telegram_app() -> Application | None:
+    """Створює та налаштовує екземпляр Telegram Application."""
     global initialization_error
     logger.info("Initializing Telegram Application...")
     if not BOT_TOKEN:
-        logger.critical("BOT_TOKEN environment variable not found.")
-        initialization_error = RuntimeError("BOT_TOKEN not found")
+        initialization_error = RuntimeError("BOT_TOKEN не знайдено")
+        logger.critical(initialization_error)
         return None
     try:
-        # --- ЗМІНЕНО КЛАС ---
-        # Створюємо об'єкт HTTPXRequest зі збільшеними таймаутами
-        request_settings = HTTPXRequest(connect_timeout=10.0, read_timeout=20.0, pool_timeout=15.0)
-        # -------------------
+        # Налаштування таймаутів для HTTP-запитів бібліотеки
+        request_settings = HTTPXRequest(
+            connect_timeout=10.0,  # Час на встановлення з'єднання
+            read_timeout=20.0,     # Час на очікування відповіді
+            pool_timeout=15.0      # Час очікування вільного з'єднання з пулу
+        )
         logger.info(f"Configured PTB Request with timeouts: connect={request_settings.connect_timeout}, read={request_settings.read_timeout}, pool={request_settings.pool_timeout}")
 
+        # Створюємо Application
         builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings)
         app = builder.build()
 
-        logger.info("Telegram Application instance created.")
+        # Додаємо обробники
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("help", help_command))
         app.add_handler(CommandHandler("convert", convert_command))
-        app.add_handler(MessageHandler(filters.COMMAND | filters.TEXT & ~filters.UpdateType.EDITED, unknown))
+        # --- ВИПРАВЛЕНО ФІЛЬТР ---
+        # Обробник для простого тексту (не команд)
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
+        # Обробник для невідомих команд (має бути останнім)
+        app.add_handler(MessageHandler(filters.COMMAND, unknown))
+        # -----------------------
+
         logger.info("Command and message handlers added.")
         return app
     except Exception as e:
-        logger.critical(f"CRITICAL ERROR during Telegram Application setup: {e}", exc_info=True)
         initialization_error = e
+        logger.critical(f"CRITICAL ERROR during Telegram Application setup: {e}", exc_info=True)
         return None
 
-# --- Створення Flask App ---
-# (Без змін)
-_flask_app = Flask(__name__)
-
-# --- Асинхронна функція для запуску ---
-# (Без змін)
+# --- Асинхронне завантаження та налаштування ---
 async def startup():
+    """Виконує асинхронну ініціалізацію бота та вебхука."""
     global application, initialization_error
-    logger.info("Running async startup tasks...")
-    application = initialize_telegram_app() # Викликає оновлену функцію
+    logger.info("Початок асинхронної ініціалізації (startup)...")
+    application = initialize_telegram_app()
     if application:
         logger.info("Initializing Telegram Application object...")
         try:
-            await application.initialize()
+            await application.initialize() # Асинхронна ініціалізація PTB
             logger.info("Telegram Application initialized successfully.")
-            if WEBHOOK_URL:
-                 webhook_set = await setup_bot_webhook(application, WEBHOOK_URL)
-                 if not webhook_set: logger.warning("Webhook setup failed during startup.")
-            else: logger.warning("WEBHOOK_URL not set. Skipping webhook setup.")
+            # Встановлення вебхука
+            webhook_ok = await setup_webhook(application, WEBHOOK_URL)
+            if not webhook_ok:
+                logger.warning("Webhook setup failed or URL not provided. Bot might not receive updates.")
+                # Можна встановити помилку, якщо вебхук критичний
+                # initialization_error = RuntimeError("Failed to set webhook")
         except Exception as e:
             logger.critical(f"CRITICAL ERROR during async application initialize/webhook setup: {e}", exc_info=True)
             initialization_error = e
-            application = None
-    else: logger.critical("Telegram Application object could not be created.")
-    _flask_app.config['TELEGRAM_APP'] = application
-    _flask_app.config['INIT_ERROR'] = initialization_error
-    logger.info("Async startup tasks finished.")
+            application = None # Зробити недоступним, якщо ініціалізація не вдалась
+    else:
+        logger.critical("Telegram Application object could not be created. Check previous logs.")
+        # initialization_error вже має бути встановлено в initialize_telegram_app
 
-# Запускаємо асинхронну ініціалізацію
-# (Без змін)
+    # Зберігаємо стан у конфіг Flask
+    flask_app.config['TELEGRAM_APP'] = application
+    flask_app.config['INIT_ERROR'] = initialization_error
+    logger.info("Асинхронна ініціалізація (startup) завершена.")
+
+# --- Flask App та маршрути ---
+flask_app = Flask(__name__) # Створюємо Flask app
+
+# Запускаємо асинхронну ініціалізацію ПЕРЕД створенням маршрутів
 try:
     logger.info("Starting asyncio.run(startup())...")
     asyncio.run(startup())
     logger.info("asyncio.run(startup()) finished.")
 except Exception as e:
      logger.critical(f"CRITICAL ERROR running asyncio.run(startup): {e}", exc_info=True)
-     if not initialization_error: initialization_error = e
-     _flask_app.config['INIT_ERROR'] = initialization_error
-     _flask_app.config['TELEGRAM_APP'] = None
+     # Переконуємось, що помилка зафіксована
+     if not initialization_error:
+          initialization_error = e
+     flask_app.config['INIT_ERROR'] = initialization_error
+     flask_app.config['TELEGRAM_APP'] = None # Явно вказуємо, що додаток не готовий
 
-# --- Обробники Flask (маршрути) ---
-# (Без змін)
-@_flask_app.route("/webhook", methods=["POST"])
-async def webhook() -> Response:
-    current_app = _flask_app.config.get('TELEGRAM_APP')
-    init_error = _flask_app.config.get('INIT_ERROR')
-    if init_error:
-         logger.error(f"Webhook request received, but initialization failed: {init_error}")
-         return Response(status=500, response=f"Bot initialization error: {init_error}")
-    if not current_app:
-        logger.error("Webhook request received, but Telegram Application is not available!")
-        return Response(status=500, response="Bot application not initialized")
-    logger.debug("--> Processing incoming request on /webhook...")
-    try:
-        update_data = request.get_json()
-        if not update_data:
-             logger.warning("Received empty JSON data on /webhook.")
-             return Response(status=200)
-        log_data_snippet = str(update_data)[:200]
-        logger.info(f"Received update data (snippet): {log_data_snippet}...")
-        update = Update.de_json(update_data, current_app.bot)
-        logger.debug(f"Update deserialized successfully for update_id: {update.update_id}")
-        logger.info(f"Calling application.process_update for update_id: {update.update_id}...")
-        await current_app.process_update(update)
-        logger.info(f"Finished application.process_update for update_id: {update.update_id}.")
-        logger.debug("<-- Finished processing /webhook request. Sending 200 OK.")
-        return Response(status=200)
-    except Exception as e:
-        update_id = "N/A"
-        try:
-            if isinstance(update_data, dict): update_id = update_data.get('update_id', 'N/A')
-        except Exception: pass
-        logger.error(f"!!! UNEXPECTED ERROR processing webhook update (update_id: {update_id}) !!!: {e}", exc_info=True)
-        return Response(status=200)
-
-@_flask_app.route("/")
-@_flask_app.route("/healthz")
+# Маршрут для перевірки стану (health check)
+@flask_app.route("/", methods=["GET", "HEAD"] )
+@flask_app.route("/healthz", methods=["GET", "HEAD"])
 def health_check():
-    init_error = _flask_app.config.get('INIT_ERROR')
-    app_instance = _flask_app.config.get('TELEGRAM_APP')
-    if init_error:
-        logger.error(f"Health check failed due to initialization error: {init_error}")
-        return f"Initialization Error: {init_error}", 500
-    elif not app_instance:
+    """Перевіряє, чи бот ініціалізовано."""
+    err = flask_app.config.get('INIT_ERROR')
+    app_inst = flask_app.config.get('TELEGRAM_APP')
+    if err:
+        logger.error(f"Health check failed due to initialization error: {err}")
+        return f"Initialization Error: {err}", 500
+    elif not app_inst:
          logger.error("Health check failed: Telegram Application instance is missing.")
          return "Error: Bot application not available", 500
     else:
-        logger.info("Health check requested (/ or /healthz) - OK")
+        logger.info("Health check requested - OK")
         return "OK", 200
 
-# --- Створюємо ASGI-сумісний додаток ---
-# (Без змін)
-asgi_app = WsgiToAsgi(_flask_app)
+# Маршрут для отримання вебхуків від Telegram
+@flask_app.route("/webhook", methods=["POST"])
+async def webhook() -> Response:
+    """Обробляє вхідні оновлення Telegram."""
+    err = flask_app.config.get('INIT_ERROR')
+    app_inst = flask_app.config.get('TELEGRAM_APP')
+
+    # Перевірка ініціалізації
+    if err or not app_inst:
+        logger.error(f"Webhook request received, but initialization failed or app not available. Error: {err}")
+        return Response(status=500)
+
+    # Обробка запиту
+    logger.debug("--> Processing incoming request on /webhook...")
+    try:
+        data = await request.get_json() # Використовуємо await для асинхронного Flask
+        if not data:
+            logger.warning("Received empty JSON data on /webhook.")
+            return Response(status=200) # Відповідь ОК, щоб Telegram не повторював
+
+        update = Update.de_json(data, app_inst.bot)
+        logger.info(f"Calling application.process_update for update_id: {update.update_id}...")
+        await app_inst.process_update(update)
+        logger.info(f"Finished application.process_update for update_id: {update.update_id}.")
+        return Response(status=200) # Завжди повертаємо 200 OK для Telegram
+
+    except Exception as e:
+        update_id = "N/A"
+        try: # Спробуємо отримати update_id для логування
+            if isinstance(data, dict): update_id = data.get('update_id', 'N/A')
+        except: pass
+        logger.error(f"!!! UNEXPECTED ERROR processing webhook update (update_id: {update_id}) !!!: {e}", exc_info=True)
+        # Все одно повертаємо 200, щоб Telegram не надсилав це оновлення повторно
+        return Response(status=200)
+
+# Обгортка Flask -> ASGI для Gunicorn + Uvicorn
+# Gunicorn буде використовувати 'asgi_app'
+asgi_app = WsgiToAsgi(flask_app)
 logger.info("Flask app wrapped with WsgiToAsgi for ASGI compatibility.")
 
 # --- Запуск (для локального тестування) ---
-# (Без змін)
 # if __name__ == "__main__":
 #     import uvicorn
 #     logger.info("Starting Uvicorn development server (for local testing only)...")
+#     # Запускаємо asgi_app, а не flask_app
 #     uvicorn.run("main_bot:asgi_app", host="0.0.0.0", port=PORT, log_level="info")
