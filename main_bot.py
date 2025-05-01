@@ -1,4 +1,4 @@
-# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency - Enhanced Logging - Fixed AttributeError)
+# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency - Enhanced Logging - Fixed AttributeError & TypeError)
 import os
 import logging
 import asyncio
@@ -366,8 +366,9 @@ async def webhook() -> Response:
     logger.debug("--> Processing incoming request on /webhook...")
     update = None
     try:
-        # Отримуємо тіло запиту як байти, щоб уникнути проблем з request.get_json в async
-        raw_data = await request.get_data()
+        # Отримуємо тіло запиту як байти (синхронно)
+        # ВИПРАВЛЕНО: Прибрали await
+        raw_data = request.get_data()
         if not raw_data:
              logger.warning("Received empty request body on /webhook.")
              return Response(status=200) # Порожній запит - ігноруємо
