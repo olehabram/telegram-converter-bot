@@ -1,7 +1,8 @@
-# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency - Fixed TypeError in webhook)
+# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency - Enhanced Logging)
 import os
 import logging
 import asyncio
+import json # Додано для обробки JSONDecodeError
 from flask import Flask, request, Response
 from telegram import Update
 from telegram.ext import (
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 # --- Змінні середовища ---
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-PORT = int(os.environ.get('PORT', 8080))
+PORT = int(os.environ.get('PORT', 8080)) # Render надасть змінну PORT
 
 # --- Глобальні змінні ---
 application: Application | None = None
@@ -105,9 +106,10 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         amount_str = args[0]
-        from_unit = " ".join(args[1:-2])
-        to_unit = args[-1]
-        amount = float(amount_str.replace(',', '.'))
+        # Об'єднуємо всі частини "з", якщо їх більше однієї (наприклад, "cubic meter")
+        from_unit = " ".join(args[1:-2]).strip()
+        to_unit = args[-1].strip()
+        amount = float(amount_str.replace(',', '.')) # Дозволяємо кому як десятковий роздільник
         logger.debug(f"Parsed conversion: {amount} '{from_unit}' -> '{to_unit}'")
     except ValueError:
         logger.warning(f"Invalid number format '{amount_str}' from user {user_id}")
@@ -127,44 +129,68 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     reply_text = ""
     conversion_done = False
 
+    # Спроба конвертації одиниць (синхронна функція)
     logger.debug(f"Attempting unit conversion for: {amount} '{from_unit}' -> '{to_unit}'")
-    unit_result = unit_converter.convert_units(amount, from_unit, to_unit)
-    if unit_result is not None:
-        logger.info(f"Unit conversion successful: {amount} {from_unit} -> {unit_result} {to_unit}")
-        if unit_result == int(unit_result):
-            reply_text = f"{amount} {from_unit.upper()} = {int(unit_result)} {to_unit.upper()}"
+    try:
+        unit_result = unit_converter.convert_units(amount, from_unit, to_unit)
+        if unit_result is not None:
+            logger.info(f"Unit conversion successful: {amount} {from_unit} -> {unit_result} {to_unit}")
+            # Форматування результату (ціле число або з 4 знаками після коми)
+            if unit_result == int(unit_result):
+                reply_text = f"{amount} {from_unit.upper()} = {int(unit_result)} {to_unit.upper()}"
+            else:
+                reply_text = f"{amount} {from_unit.upper()} = {unit_result:.4f} {to_unit.upper()}"
+            conversion_done = True
         else:
-            reply_text = f"{amount} {from_unit.upper()} = {unit_result:.4f} {to_unit.upper()}"
-        conversion_done = True
+             logger.debug(f"Unit conversion returned None (likely not units or incompatible).")
+    except Exception as e:
+        logger.error(f"!!! EXCEPTION during unit conversion call for user {user_id} !!!: {e}", exc_info=True)
+        reply_text = "Виникла внутрішня помилка при конвертації одиниць."
+        # Не встановлюємо conversion_done = True, щоб спробувати валюту, якщо помилка була некритичною
 
+    # Якщо одиниці не конвертувалися, спроба конвертації валюти (асинхронна функція)
     if not conversion_done:
-        logger.debug(f"Unit conversion failed, attempting currency conversion for: '{from_unit}' -> '{to_unit}'")
+        # Перевірка, чи схоже на коди валют (3 літери)
         is_potential_currency = (len(from_unit) == 3 and from_unit.isalpha() and len(to_unit) == 3 and to_unit.isalpha())
+        logger.debug(f"Unit conversion failed or skipped, attempting currency conversion for: '{from_unit}' -> '{to_unit}' (Potential Currency: {is_potential_currency})")
+
         if is_potential_currency:
             try:
+                # Викликаємо асинхронну функцію конвертації валют
                 currency_result = await currency_converter.convert_currency(amount, from_unit, to_unit)
                 if currency_result is not None:
+                    logger.info(f"Currency conversion successful: {amount} {from_unit.upper()} -> {currency_result} {to_unit.upper()}")
                     reply_text = f"{amount} {from_unit.upper()} = {currency_result:.2f} {to_unit.upper()}"
                     conversion_done = True
                 else:
-                    logger.warning(f"Currency conversion function returned None for {from_unit} -> {to_unit}")
+                    # Функція повернула None, ймовірно, не знайшла курс
+                    logger.warning(f"Currency conversion function returned None for {from_unit.upper()} -> {to_unit.upper()}")
                     reply_text = (
                         f"Не вдалося конвертувати валюту {from_unit.upper()} в {to_unit.upper()}.\n"
-                        f"Перевірте правильність кодів валют або спробуйте /help."
+                        f"Перевірте правильність кодів валют або спробуйте пізніше."
                     )
+                    # Встановлюємо conversion_done = True, щоб не показувати повідомлення "не вдалося розпізнати"
+                    conversion_done = True
             except Exception as e:
                 logger.error(f"!!! EXCEPTION during currency conversion call for user {user_id} !!!: {e}", exc_info=True)
                 reply_text = "Виникла внутрішня помилка при конвертації валюти."
+                # Встановлюємо conversion_done = True, щоб не показувати повідомлення "не вдалося розпізнати"
+                conversion_done = True
         else:
-            logger.warning(f"Could not recognize units/currency: '{from_unit}' or '{to_unit}' for user {user_id}")
-            reply_text = (
-                f"Не вдалося розпізнати одиниці/валюти: '{from_unit}' або '{to_unit}'.\n"
-                f"Перевірте правильність написання або спробуйте /help."
-            )
+            # Якщо не схоже на валюту і одиниці не розпізнались
+             logger.warning(f"Could not recognize units/currency: '{from_unit}' or '{to_unit}' for user {user_id}")
+             reply_text = (
+                 f"Не вдалося розпізнати одиниці/валюти: '{from_unit}' або '{to_unit}'.\n"
+                 f"Перевірте правильність написання або спробуйте /help."
+             )
+             conversion_done = True # Вважаємо обробленим, хоч і з помилкою розпізнавання
 
+    # Якщо жодна конвертація не вдалася і немає специфічного повідомлення про помилку
     if not conversion_done and not reply_text:
-         reply_text = "Не вдалося виконати конвертацію. Перевірте формат запиту."
+         logger.error(f"Conversion failed for unknown reason for user {user_id}. Args: {args}")
+         reply_text = "Не вдалося виконати конвертацію. Перевірте формат запиту та одиниці/валюти."
 
+    # Надсилання відповіді
     try:
         await update.message.reply_text(reply_text)
         logger.info(f"<-- Successfully sent /convert reply to user {user_id}")
@@ -181,51 +207,57 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"!!! EXCEPTION sending 'unknown command' message to chat {update.effective_chat.id} !!!: {e}", exc_info=True)
 
 # --- Налаштування вебхука ---
-# (Без змін)
 async def setup_webhook(app: Application, url: str) -> bool:
     if not url:
         logger.error("WEBHOOK_URL не задано в змінних середовища!")
         return False
     logger.info(f"Attempting to set webhook to URL: {url}")
     try:
+        # drop_pending_updates=True - важливо, щоб пропустити старі оновлення при перезапуску
         await app.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        # Перевіряємо, чи вебхук дійсно встановлено
         info = await app.bot.get_webhook_info()
         if info.url == url:
             logger.info(f"Webhook successfully set to {info.url}")
             if info.last_error_date:
-                 logger.warning(f"Webhook info reports previous error date: {info.last_error_date}, message: {info.last_error_message}")
+                 # Логуємо, якщо Telegram повідомляє про попередні помилки доставки
+                 last_error_ts = info.last_error_date.strftime('%Y-%m-%d %H:%M:%S') if info.last_error_date else 'N/A'
+                 logger.warning(f"Webhook info reports previous error: Date={last_error_ts}, Message='{info.last_error_message}'")
             return True
         else:
-            logger.error(f"Failed to set webhook. Current URL: '{info.url}', Expected: '{url}'")
+            logger.error(f"Failed to set webhook. Current URL reported by Telegram: '{info.url}', Expected: '{url}'")
             return False
     except Exception as e:
         logger.error(f"CRITICAL ERROR during set_webhook/get_webhook_info: {e}", exc_info=True)
         return False
 
 # --- Ініціалізація Telegram Application ---
-# (Без змін, використовує HTTPXRequest)
 def initialize_telegram_app() -> Application | None:
     global initialization_error
     logger.info("Initializing Telegram Application...")
     if not BOT_TOKEN:
-        initialization_error = RuntimeError("BOT_TOKEN не знайдено")
+        initialization_error = RuntimeError("BOT_TOKEN не знайдено в змінних середовища!")
         logger.critical(initialization_error)
         return None
     try:
+        # Налаштовуємо таймаути для HTTP-запитів до Telegram API
         request_settings = HTTPXRequest(
-            connect_timeout=10.0,
-            read_timeout=20.0,
-            pool_timeout=15.0
+            connect_timeout=10.0, # Таймаут на підключення
+            read_timeout=20.0,    # Таймаут на читання відповіді
+            pool_timeout=15.0     # Таймаут на очікування з'єднання з пулу
         )
-        logger.info("Configured PTB Request with custom timeouts.")
+        logger.info(f"Configured PTB Request with timeouts: connect={request_settings.connect_timeout}, read={request_settings.read_timeout}, pool={request_settings.pool_timeout}")
 
         builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings)
         app = builder.build()
 
+        # Додаємо обробники
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("help", help_command))
         app.add_handler(CommandHandler("convert", convert_command))
+        # Обробник для невідомих текстових повідомлень (не команд)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
+        # Обробник для невідомих команд
         app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
         logger.info("Command and message handlers added.")
@@ -236,7 +268,6 @@ def initialize_telegram_app() -> Application | None:
         return None
 
 # --- Асинхронне завантаження та налаштування ---
-# (Без змін)
 async def startup():
     global application, initialization_error
     logger.info("Початок асинхронної ініціалізації (startup)...")
@@ -244,93 +275,144 @@ async def startup():
     if application:
         logger.info("Initializing Telegram Application object...")
         try:
+            # Асинхронна ініціалізація Application (важливо для деяких компонентів PTB)
             await application.initialize()
             logger.info("Telegram Application initialized successfully.")
+            # Встановлюємо вебхук
             webhook_ok = await setup_webhook(application, WEBHOOK_URL)
             if not webhook_ok:
-                logger.warning("Webhook setup failed or URL not provided.")
+                logger.warning("Webhook setup failed or WEBHOOK_URL not provided. Bot might not receive updates.")
+                # Можна встановити помилку, якщо вебхук критичний
+                # initialization_error = RuntimeError("Webhook setup failed")
+                # application = None # Або не скидати, якщо хочемо спробувати працювати без вебхука (неможливо на Render)
         except Exception as e:
             logger.critical(f"CRITICAL ERROR during async application initialize/webhook setup: {e}", exc_info=True)
             initialization_error = e
-            application = None
+            application = None # Помилка ініціалізації - додаток не готовий
     else:
-        logger.critical("Telegram Application object could not be created.")
+        logger.critical("Telegram Application object could not be created (check previous logs for errors).")
+        # initialization_error вже має бути встановлено в initialize_telegram_app
 
+    # Зберігаємо стан у конфіг Flask (доступно в запитах)
     flask_app.config['TELEGRAM_APP'] = application
     flask_app.config['INIT_ERROR'] = initialization_error
-    logger.info("Асинхронна ініціалізація (startup) завершена.")
+    logger.info(f"Асинхронна ініціалізація (startup) завершена. App available: {application is not None}. Init error: {initialization_error}")
 
 # --- Flask App та маршрути ---
-# (Без змін)
 flask_app = Flask(__name__)
 
+# Запускаємо асинхронну ініціалізацію ПЕРЕД створенням маршрутів,
+# щоб application та initialization_error були доступні
 try:
-    logger.info("Starting asyncio.run(startup())...")
+    logger.info("Starting asyncio.run(startup()) during Flask app creation...")
+    # Використовуємо asyncio.run для запуску асинхронної функції startup
+    # Це блокує до завершення startup
     asyncio.run(startup())
     logger.info("asyncio.run(startup()) finished.")
 except Exception as e:
+     # Логуємо критичну помилку, якщо сам запуск startup не вдався
      logger.critical(f"CRITICAL ERROR running asyncio.run(startup): {e}", exc_info=True)
-     if not initialization_error:
+     if not initialization_error: # Якщо помилка не була встановлена всередині startup
           initialization_error = e
+     # Забезпечуємо, що стан помилки збережено в конфігу Flask
      flask_app.config['INIT_ERROR'] = initialization_error
      flask_app.config['TELEGRAM_APP'] = None
 
 @flask_app.route("/", methods=["GET", "HEAD"] )
 @flask_app.route("/healthz", methods=["GET", "HEAD"])
 def health_check():
+    """Перевірка стану для Render."""
+    # Отримуємо стан з конфігу Flask
     err = flask_app.config.get('INIT_ERROR')
     app_inst = flask_app.config.get('TELEGRAM_APP')
+    webhook_info = None
+
+    status_code = 200
+    message = "OK"
+
     if err:
         logger.error(f"Health check failed due to initialization error: {err}")
-        return f"Initialization Error: {err}", 500
+        status_code = 500
+        message = f"Initialization Error: {err}"
     elif not app_inst:
          logger.error("Health check failed: Telegram Application instance is missing.")
-         return "Error: Bot application not available", 500
+         status_code = 500
+         message = "Error: Bot application not available"
     else:
-        logger.info("Health check requested - OK")
-        return "OK", 200
+        # Якщо є додаток, спробуємо отримати інфо про вебхук (але це синхронний хендлер!)
+        # Краще перевіряти статус вебхука асинхронно, якщо це можливо,
+        # але для простої перевірки можна просто підтвердити, що об'єкт app існує.
+        logger.info("Health check requested - Application instance exists.")
+        # Можна додати перевірку info = await app_inst.bot.get_webhook_info()
+        # але це вимагатиме зробити health_check асинхронним, що ускладнить
+
+    logger.info(f"Health check result: Status={status_code}, Message='{message}'")
+    return message, status_code
 
 @flask_app.route("/webhook", methods=["POST"])
 async def webhook() -> Response:
     """Обробляє вхідні оновлення Telegram."""
+    # Отримуємо стан з конфігу Flask
     err = flask_app.config.get('INIT_ERROR')
     app_inst = flask_app.config.get('TELEGRAM_APP')
 
+    # Перевіряємо, чи ініціалізація пройшла успішно
     if err or not app_inst:
         logger.error(f"Webhook request received, but initialization failed or app not available. Error: {err}")
+        # Повертаємо 500, щоб сигналізувати про проблему
         return Response(status=500)
 
     logger.debug("--> Processing incoming request on /webhook...")
     update = None
-    data = None # Ініціалізуємо data тут
     try:
-        # --- ВИПРАВЛЕНО: Викликаємо get_json без await ---
-        data = request.get_json()
-        # -------------------------------------------------
-        if not data:
-            logger.warning("Received empty JSON data on /webhook.")
-            return Response(status=200)
+        # Отримуємо тіло запиту як байти, щоб уникнути проблем з request.get_json в async
+        raw_data = await request.get_data()
+        if not raw_data:
+             logger.warning("Received empty request body on /webhook.")
+             return Response(status=200) # Порожній запит - ігноруємо
 
+        # Декодуємо JSON вручну
+        try:
+            data = json.loads(raw_data)
+            logger.debug(f"Webhook received JSON data: {data}") # Логуємо отримані дані (обережно з токенами!)
+        except json.JSONDecodeError as json_err:
+            logger.error(f"Failed to decode JSON from webhook request: {json_err}. Raw data: {raw_data[:200]}...") # Показуємо початок сирих даних
+            return Response(status=400) # Поганий запит
+
+        # Десеріалізуємо Update
         update = Update.de_json(data, app_inst.bot)
         logger.info(f"Calling application.process_update for update_id: {update.update_id}...")
+
+        # Запускаємо обробку оновлення
         await app_inst.process_update(update)
+
         logger.info(f"Finished application.process_update for update_id: {update.update_id}.")
+        # Повертаємо 200 OK, щоб Telegram знав, що ми отримали оновлення
         return Response(status=200)
 
     except Exception as e:
+        # Логуємо будь-які інші неочікувані помилки під час обробки
         update_id_str = f"update_id: {update.update_id}" if update else "update data unavailable"
         logger.error(f"!!! UNEXPECTED ERROR processing webhook update ({update_id_str}) !!!: {e}", exc_info=True)
+        # Все одно повертаємо 200 OK, щоб Telegram не намагався повторно надіслати це ж оновлення
+        # Якщо тут повертати 500, Telegram буде повторювати запит, що може призвести до циклу помилок
         return Response(status=200)
 
 # --- Обгортка Flask -> ASGI ---
-# (Без змін)
+# Створюємо ASGI-сумісний об'єкт з нашого Flask додатка
 asgi_app = WsgiToAsgi(flask_app)
 logger.info("Flask app wrapped with WsgiToAsgi for ASGI compatibility.")
 
 # --- Запуск (для локального тестування) ---
-# (Без змін)
+# Цей блок не буде виконуватися на Render, там використовується команда запуску Gunicorn
 # if __name__ == "__main__":
 #     import uvicorn
 #     logger.info("Starting Uvicorn development server (for local testing only)...")
-#     uvicorn.run("main_bot:asgi_app", host="0.0.0.0", port=PORT, log_level="info")
-
+#     # Запускаємо ASGI додаток за допомогою Uvicorn
+#     uvicorn.run(
+#         "main_bot:asgi_app",
+#         host="0.0.0.0",
+#         port=PORT,
+#         log_level="info",
+#         reload=True # Додано для зручності розробки (автоперезавантаження при зміні коду)
+#      )

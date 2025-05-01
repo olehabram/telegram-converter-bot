@@ -1,1 +1,1 @@
-web: uvicorn main_bot:asgi_app --host 0.0.0.0 --port $PORT --workers 1 --log-level info
+gunicorn -w 4 -k uvicorn.workers.UvicornWorker main_bot:asgi_app --bind 0.0.0.0:$PORT
