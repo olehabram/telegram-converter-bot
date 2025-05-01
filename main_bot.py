@@ -1,4 +1,4 @@
-# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency - Enhanced Logging)
+# main_bot.py (Webhook Version - ASGI Wrapper + PTB Timeouts + Async Currency - Enhanced Logging - Fixed AttributeError)
 import os
 import logging
 import asyncio
@@ -246,7 +246,8 @@ def initialize_telegram_app() -> Application | None:
             read_timeout=20.0,    # Таймаут на читання відповіді
             pool_timeout=15.0     # Таймаут на очікування з'єднання з пулу
         )
-        logger.info(f"Configured PTB Request with timeouts: connect={request_settings.connect_timeout}, read={request_settings.read_timeout}, pool={request_settings.pool_timeout}")
+        # ВИПРАВЛЕНО: Просто логуємо факт налаштування, не намагаючись читати атрибути
+        logger.info("Configured PTB Request with custom timeouts.")
 
         builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings)
         app = builder.build()
