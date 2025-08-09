@@ -5,6 +5,7 @@ import asyncio
 import json
 from flask import Flask, request, Response
 from telegram import Update
+from telegram.ext import filters
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ApplicationBuilder
@@ -229,7 +230,6 @@ async def setup_webhook(app: Application, url: str) -> bool:
 
 # --- Ініціалізація Telegram Application (Синхронна частина) ---
 def initialize_telegram_app_sync() -> Application | None:
-    """Створює та налаштовує об'єкт Application (без async initialize)."""
     global initialization_error
     logger.info("Initializing Telegram Application (sync part)...")
     if not BOT_TOKEN:
@@ -242,25 +242,36 @@ def initialize_telegram_app_sync() -> Application | None:
             read_timeout=20.0,
             pool_timeout=15.0
         )
-        logger.info("Configured PTB Request with custom timeouts.")
-
         builder = ApplicationBuilder().token(BOT_TOKEN).request(request_settings)
         app = builder.build()
 
-        # Додаємо обробники
+        # Команди
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("help", help_command))
         app.add_handler(CommandHandler("convert", convert_command))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown))
+
+        # Обробка тексту без "/"
+        def is_conversion_text(message: str) -> bool:
+            parts = message.strip().split()
+            return len(parts) >= 4 and parts[-2].lower() == "to"
+
+        async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if is_conversion_text(update.message.text):
+                await convert_command(update, context)
+            else:
+                await unknown(update, context)
+
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
         app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
         logger.info("Command and message handlers added.")
-        initialization_error = None # Скидаємо помилку, якщо синхронна частина пройшла
+        initialization_error = None
         return app
     except Exception as e:
         initialization_error = e
         logger.critical(f"CRITICAL ERROR during Telegram Application sync setup: {e}", exc_info=True)
         return None
+
 
 # --- Асинхронна частина ініціалізації ---
 async def initialize_bot_async(app: Application) -> bool:
