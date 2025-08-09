@@ -10,7 +10,8 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 from asgiref.wsgi import WsgiToAsgi
-import currency_converter
+from currency_with_mono import convert_currency_with_mono
+
 import unit_converter
 
 # --- Logging ---
@@ -91,8 +92,9 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply_text = "Виникла внутрішня помилка при конвертації одиниць."
 
     if not conversion_done:
-        if len(args[1]) == 3 and len(args[-1]) == 3:
-            currency_result = await currency_converter.convert_currency(
+        # Перевірка, чи виглядає це як валюти (3 літери)
+        if len(from_unit) == 3 and len(to_unit) == 3 and from_unit.isalpha() and to_unit.isalpha():
+            currency_result = await convert_currency_with_mono(
                 amount, from_unit.upper(), to_unit.upper()
             )
             if currency_result is not None:
@@ -113,6 +115,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply_text = "Не вдалося виконати конвертацію."
 
     await update.message.reply_text(reply_text)
+
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Невідома команда або формат. Спробуйте /help.")
