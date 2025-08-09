@@ -1,103 +1,98 @@
-# unit_converter.py
+import logging
 
-# Словник з коефіцієнтами конвертації відносно базової одиниці СІ
-# Базові одиниці: метр (m) для довжини, кілограм (kg) для маси, літр (l) для об'єму
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+
 CONVERSION_FACTORS = {
-    # Довжина (базова: метр 'm')
     'length': {
-        'mm': 0.001,      # Міліметр
-        'cm': 0.01,       # Сантиметр
-        'm': 1.0,         # Метр
-        'km': 1000.0,     # Кілометр
-        'in': 0.0254,     # Дюйм (inch)
-        'ft': 0.3048,     # Фут (foot)
-        'yd': 0.9144,     # Ярд (yard)  <--- ДОДАНО
-        'mi': 1609.34,    # Миля (mile)
+        'mm': 0.001,
+        'cm': 0.01,
+        'm': 1.0,
+        'km': 1000.0,
+        'in': 0.0254,
+        'ft': 0.3048,
+        'yd': 0.9144,
+        'mi': 1609.34,
     },
-    # Маса (базова: кілограм 'kg')
     'mass': {
-        'mg': 0.000001,   # Міліграм
-        'g': 0.001,       # Грам
-        'kg': 1.0,        # Кілограм
-        't': 1000.0,      # Тонна (метрична)
-        'oz': 0.0283495,  # Унція (ounce)
-        'lb': 0.453592,   # Фунт (pound)
+        'mg': 1e-6,
+        'g': 0.001,
+        'kg': 1.0,
+        't': 1000.0,
+        'oz': 0.0283495,
+        'lb': 0.453592,
     },
-    # Об'єм (базова: літр 'l')
     'volume': {
-        'ml': 0.001,      # Мілілітр
-        'l': 1.0,         # Літр
-        'm3': 1000.0,     # Кубічний метр (m³)
-        'gal': 3.78541,   # Галон (US liquid gallon)
+        'ml': 0.001,
+        'l': 1.0,
+        'm3': 1000.0,
+        'gal': 3.78541,
     }
 }
 
 
-def get_unit_category(unit):
-    """Визначає категорію (довжина, маса, об'єм) для заданої одиниці."""
-    unit_lower = unit.lower()
+def get_unit_category(unit: str) -> str | None:
+    unit = unit.lower()
     for category, units in CONVERSION_FACTORS.items():
-        if unit_lower in units:
+        if unit in units:
             return category
     return None
 
 
-def convert_units(value, from_unit, to_unit):
-    """
-    Конвертує значення з однієї одиниці в іншу в межах однієї категорії.
-    """
-    from_unit_lower = from_unit.lower()
-    to_unit_lower = to_unit.lower()
+def convert_units(value: float, from_unit: str, to_unit: str) -> float | None:
+    from_unit_l = from_unit.lower()
+    to_unit_l = to_unit.lower()
 
-    from_category = get_unit_category(from_unit_lower)
-    to_category = get_unit_category(to_unit_lower)
+    from_cat = get_unit_category(from_unit_l)
+    to_cat = get_unit_category(to_unit_l)
 
-    if not from_category or not to_category:
-        return None # Можливо, це валюта
-
-    if from_category != to_category:
-        is_potential_currency = (
-            len(from_unit) == 3 and from_unit.isalpha() and
-            len(to_unit) == 3 and to_unit.isalpha()
-        )
-        if not is_potential_currency:
-             # Логуємо тільки якщо це точно не валюта
-             print(f"Помилка: Неможливо конвертувати між різними категоріями ({from_category} -> {to_category})")
+    if not from_cat or not to_cat:
+        logger.error(f"Unknown unit(s): {from_unit} or {to_unit}")
         return None
 
-    factors = CONVERSION_FACTORS[from_category]
-
-    try:
-        factor_from = factors.get(from_unit_lower)
-        factor_to = factors.get(to_unit_lower)
-
-        if factor_from is None or factor_to is None:
-             print(f"Внутрішня помилка: Не знайдено коефіцієнт для {from_unit} або {to_unit} у категорії {from_category}")
-             return None
-
-        if factor_to == 0:
-            print(f"Помилка: Коефіцієнт для цільової одиниці {to_unit} дорівнює нулю.")
+    if from_cat != to_cat:
+        if not (len(from_unit) == 3 and from_unit.isalpha() and len(to_unit) == 3 and to_unit.isalpha()):
+            logger.error(f"Cannot convert between different categories: {from_cat} -> {to_cat}")
             return None
 
-        value_in_base_unit = value * factor_from
-        converted_value = value_in_base_unit / factor_to
-        return converted_value
+    factors = CONVERSION_FACTORS[from_cat]
 
+    try:
+        factor_from = factors[from_unit_l]
+        factor_to = factors[to_unit_l]
+
+        if factor_to == 0:
+            logger.error(f"Conversion factor for target unit {to_unit} is zero.")
+            return None
+
+        base_value = value * factor_from
+        converted = base_value / factor_to
+        logger.info(f"Converted {value} {from_unit} to {converted:.4f} {to_unit}")
+        return converted
+    except KeyError:
+        logger.error(f"Conversion factors missing for {from_unit} or {to_unit} in category {from_cat}")
     except ZeroDivisionError:
-        print(f"Помилка ділення на нуль при конвертації одиниць (коефіцієнт для {to_unit} може бути 0).")
-        return None
+        logger.error(f"Division by zero error for target unit {to_unit}")
     except Exception as e:
-        print(f"Неочікувана помилка під час конвертації одиниць: {e}")
-        return None
+        logger.error(f"Unexpected error during conversion: {e}")
 
-# --- Приклад використання (для тестування) ---
+    return None
+
+
 if __name__ == "__main__":
-    print("--- Unit Converter Tests (with yd) ---")
-    # ... (тести з попередньої версії залишаються актуальними) ...
-    val = 7.32
-    f_unit = "m"
-    t_unit = "yd"
-    res = convert_units(val, f_unit, t_unit)
-    if res is not None: print(f"{val} {f_unit} = {res:.2f} {t_unit}")
-    else: print(f"Помилка конвертації {f_unit} -> {t_unit}")
+    # Прості тести
+    tests = [
+        (7.32, "m", "yd"),
+        (100, "kg", "lb"),
+        (500, "ml", "gal"),
+        (1, "km", "mi"),
+        (10, "ft", "cm"),
+        (100, "USD", "EUR"),  # Має повертати None (різні категорії)
+    ]
 
+    for val, f_unit, t_unit in tests:
+        res = convert_units(val, f_unit, t_unit)
+        if res is not None:
+            print(f"{val} {f_unit} = {res:.4f} {t_unit}")
+        else:
+            print(f"Conversion failed: {f_unit} -> {t_unit}")
