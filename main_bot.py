@@ -14,7 +14,7 @@ from currency_with_mono import convert_currency_with_mono
 
 import unit_converter
 
-# --- Logging ---
+# Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -26,18 +26,18 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 logging.getLogger("asgiref").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
-# --- Environment ---
+# Environment
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 PORT = int(os.environ.get('PORT', 8080))
 
-# --- Global vars ---
+# Global vars
 application: Application | None = None
 initialization_error: Exception | None = None
 init_lock = asyncio.Lock()
 is_async_initialized = False
 
-# --- Handlers ---
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     reply_content = (
@@ -120,7 +120,7 @@ async def convert_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("Невідома команда або формат. Спробуйте /help.")
 
-# --- Webhook setup ---
+# Webhook setup
 async def setup_webhook(app: Application, url: str) -> bool:
     if not url:
         logger.error("WEBHOOK_URL не задано!")
@@ -128,7 +128,7 @@ async def setup_webhook(app: Application, url: str) -> bool:
     await app.bot.set_webhook(url=url, allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
     return True
 
-# --- Init ---
+# Init
 def initialize_telegram_app_sync() -> Application | None:
     global initialization_error
     if not BOT_TOKEN:
@@ -179,7 +179,7 @@ async def initialize_bot_async(app: Application) -> bool:
         is_async_initialized = False
         return False
 
-# --- Flask app ---
+# Flask app
 flask_app = Flask(__name__)
 application = initialize_telegram_app_sync()
 flask_app.config['TELEGRAM_APP'] = application
@@ -228,5 +228,5 @@ async def webhook() -> Response:
     await app_inst.process_update(update)
     return Response(status=200)
 
-# --- ASGI wrapper ---
+# ASGI wrapper
 asgi_app = WsgiToAsgi(flask_app)

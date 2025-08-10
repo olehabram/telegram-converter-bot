@@ -1,6 +1,4 @@
-# currency_converter.py (Async version with MonoBank rates)
 import requests
-import json
 import asyncio
 import logging
 from typing import Dict, Optional, Any
@@ -136,7 +134,7 @@ async def convert_currency_with_mono(amount: float, from_currency: str, to_curre
 
     return await convert_currency(amount, from_currency, to_currency)
 
-# --- Тести для перевірки ---
+# Тести для перевірки
 async def _test():
     import logging
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
